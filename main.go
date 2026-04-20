@@ -34,7 +34,7 @@ func main() {
 
 	go c.Run()
 
-	p := tea.NewProgram(tui.New(c), tea.WithAltScreen())
+	p := tea.NewProgram(tui.New(c), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "pktz: %v\n", err)
 		os.Exit(1)

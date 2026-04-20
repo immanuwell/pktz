@@ -30,10 +30,11 @@ const (
 	sortByTotal
 	sortByName
 	sortByPID
+	sortByConn
 	sortKeyCount
 )
 
-func (s sortKey) String() string {
+func (s sortKey) label() string {
 	switch s {
 	case sortByRx:
 		return "RX/s"
@@ -45,9 +46,24 @@ func (s sortKey) String() string {
 		return "Name"
 	case sortByPID:
 		return "PID"
+	case sortByConn:
+		return "Conn"
 	}
 	return ""
 }
+
+// headerRowY is the terminal row (0-indexed) where the column headers are rendered.
+// Layout: row 0 = title bar, row 1 = blank (lipgloss join + leading \n in table),
+// row 2 = column headers.
+const headerRowY = 2
+
+// procListCols, procListHeaders, and procListSortKeys define the process table layout.
+// Each index corresponds to one column; sortKey is what clicking that header activates.
+var (
+	procListCols     = []int{7, 22, 11, 11, 11, 11, 5}
+	procListHeaders  = []string{"PID", "PROCESS", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "CONN"}
+	procListSortKeys = []sortKey{sortByPID, sortByName, sortByRx, sortByTx, sortByTotal, sortByTotal, sortByConn}
+)
 
 // tickMsg fires on every refresh interval.
 type tickMsg time.Time
@@ -70,6 +86,7 @@ type Model struct {
 	width       int
 	height      int
 	sortBy      sortKey
+	sortAsc     bool // true = A→Z / low→high, false = Z→A / high→low
 	filterInput textinput.Model
 	filtering   bool
 	err         error
@@ -84,6 +101,7 @@ func New(c *collector.Collector) Model {
 	return Model{
 		coll:        c,
 		sortBy:      sortByName,
+		sortAsc:     true, // default: alphabetical A→Z
 		filterInput: fi,
 	}
 }
@@ -114,11 +132,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case statsMsg:
 		m.procs = applyFilter(msg.procs, m.filterInput.Value())
-		sortProcs(m.procs, m.sortBy)
+		sortProcs(m.procs, m.sortBy, m.sortAsc)
 		m.conns = msg.conns
 		sortConns(m.conns)
 		if m.cursor >= len(m.procs) && len(m.procs) > 0 {
 			m.cursor = len(m.procs) - 1
+		}
+
+	case tea.MouseMsg:
+		if msg.Action == tea.MouseActionRelease && msg.Button == tea.MouseButtonLeft {
+			return m.handleMouseClick(msg.X, msg.Y)
 		}
 
 	case tea.KeyMsg:
@@ -133,6 +156,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
+	// Only the process list has clickable headers.
+	if y != headerRowY || m.activeView != viewProcessList {
+		return m, nil
+	}
+
+	// Walk column X ranges to find which header was clicked.
+	pos := 0
+	for i, w := range procListCols {
+		if x >= pos && x < pos+w {
+			if i < len(procListSortKeys) {
+				m.applySort(procListSortKeys[i])
+			}
+			return m, nil
+		}
+		pos += w
+	}
+	return m, nil
+}
+
+// applySort sets the sort key; clicking the active key toggles direction,
+// clicking a new key sets the natural direction for that column type.
+func (m *Model) applySort(sk sortKey) {
+	if m.sortBy == sk {
+		m.sortAsc = !m.sortAsc
+	} else {
+		m.sortBy = sk
+		// Natural direction: ascending for text/id columns, descending for rates.
+		m.sortAsc = (sk == sortByName || sk == sortByPID)
+	}
+}
+
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "q":
@@ -144,8 +199,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "down", "j":
-		max := listLen(m) - 1
-		if m.cursor < max {
+		if max := listLen(m) - 1; m.cursor < max {
 			m.cursor++
 		}
 
@@ -166,7 +220,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "s":
 		if m.activeView == viewProcessList {
-			m.sortBy = (m.sortBy + 1) % sortKeyCount
+			next := (m.sortBy + 1) % sortKeyCount
+			m.applySort(next)
 		}
 
 	case "/":
@@ -231,7 +286,11 @@ func (m Model) renderHeader() string {
 	if m.activeView == viewConnDetail {
 		right = breadcrumbStyle.Render(fmt.Sprintf(" %s  (pid %d)", m.detailComm, m.detailPID))
 	} else {
-		right = dimStyle.Render(fmt.Sprintf("sort: %s  [s]cycle", m.sortBy))
+		arrow := "▼"
+		if m.sortAsc {
+			arrow = "▲"
+		}
+		right = dimStyle.Render(fmt.Sprintf("sort: %s %s  [s]cycle", m.sortBy.label(), arrow))
 	}
 
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
@@ -249,12 +308,23 @@ func (m Model) renderTable() string {
 }
 
 func (m Model) renderProcTable() string {
-	cols := []int{7, 22, 11, 11, 11, 11, 5}
-	headers := []string{"PID", "PROCESS", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "CONN"}
+	// Build header labels — annotate the active sort column with ▲ / ▼.
+	headers := make([]string, len(procListHeaders))
+	copy(headers, procListHeaders)
+	arrow := "▼"
+	if m.sortAsc {
+		arrow = "▲"
+	}
+	for i, sk := range procListSortKeys {
+		if sk == m.sortBy {
+			headers[i] = clickableHeader(headers[i], arrow)
+			break
+		}
+	}
 
 	var sb strings.Builder
 	sb.WriteString("\n")
-	sb.WriteString(renderCells(headers, cols, headerStyle))
+	sb.WriteString(renderCells(headers, procListCols, headerStyle))
 	sb.WriteString("\n")
 	sb.WriteString(dimStyle.Render(strings.Repeat("─", m.width)))
 	sb.WriteString("\n")
@@ -265,7 +335,7 @@ func (m Model) renderProcTable() string {
 		return sb.String()
 	}
 
-	tableRows := m.height - 6 // header + separator + footer + padding
+	tableRows := m.height - 6
 	if tableRows < 1 {
 		tableRows = 1
 	}
@@ -277,7 +347,7 @@ func (m Model) renderProcTable() string {
 		txS := colourRate(p.TxRate).Render(formatBytes(p.TxRate) + "/s")
 		row := []string{
 			fmt.Sprintf("%d", p.PID),
-			truncate(p.Comm, cols[1]-1),
+			truncate(p.Comm, procListCols[1]-1),
 			rxS,
 			txS,
 			formatBytes(float64(p.RxTotal)),
@@ -290,7 +360,7 @@ func (m Model) renderProcTable() string {
 			style = selectedStyle
 			prefix = "▶ "
 		}
-		sb.WriteString(style.Render(prefix + renderCells(row, cols, style)))
+		sb.WriteString(style.Render(prefix + renderCells(row, procListCols, style)))
 		sb.WriteString("\n")
 	}
 	return sb.String()
@@ -354,17 +424,16 @@ func (m Model) renderFooter() string {
 	if m.filtering {
 		left = filterStyle.Render("/") + " " + m.filterInput.View()
 	} else if m.activeView == viewProcessList {
-		cnt := len(m.procs)
-		left = dimStyle.Render(fmt.Sprintf("%d process(es)", cnt))
+		left = dimStyle.Render(fmt.Sprintf("%d process(es)", len(m.procs)))
 	} else {
 		left = dimStyle.Render(fmt.Sprintf("%d connection(s)", len(m.conns)))
 	}
 
 	var keys string
 	if m.activeView == viewProcessList {
-		keys = helpStyle.Render("↑↓/jk:nav  enter:detail  /:filter  s:sort  q:quit")
+		keys = helpStyle.Render("↑↓:nav  enter:detail  click header:sort  /:filter  s:sort  q:quit")
 	} else {
-		keys = helpStyle.Render("↑↓/jk:nav  esc:back  q:quit")
+		keys = helpStyle.Render("↑↓:nav  esc:back  q:quit")
 	}
 
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(keys)
@@ -375,6 +444,11 @@ func (m Model) renderFooter() string {
 }
 
 // --- helpers ---
+
+// clickableHeader adds a sort-direction arrow to a header label.
+func clickableHeader(label, arrow string) string {
+	return activeHeaderStyle.Render(label + arrow)
+}
 
 func renderCells(cells []string, widths []int, style lipgloss.Style) string {
 	var sb strings.Builder
@@ -387,7 +461,7 @@ func renderCells(cells []string, widths []int, style lipgloss.Style) string {
 		padded := cell + strings.Repeat(" ", max(0, w-plain))
 		sb.WriteString(padded)
 	}
-	_ = style // styles applied by caller per row
+	_ = style
 	return sb.String()
 }
 
@@ -424,21 +498,28 @@ func applyFilter(procs []collector.ProcessInfo, q string) []collector.ProcessInf
 	return out
 }
 
-func sortProcs(procs []collector.ProcessInfo, by sortKey) {
+func sortProcs(procs []collector.ProcessInfo, by sortKey, asc bool) {
 	sort.Slice(procs, func(i, j int) bool {
 		a, b := procs[i], procs[j]
+		var less bool
 		switch by {
 		case sortByTx:
-			return a.TxRate > b.TxRate
+			less = a.TxRate < b.TxRate
 		case sortByTotal:
-			return (a.RxTotal + a.TxTotal) > (b.RxTotal + b.TxTotal)
+			less = (a.RxTotal + a.TxTotal) < (b.RxTotal + b.TxTotal)
 		case sortByName:
-			return a.Comm < b.Comm
+			less = a.Comm < b.Comm
 		case sortByPID:
-			return a.PID < b.PID
+			less = a.PID < b.PID
+		case sortByConn:
+			less = a.ConnCount < b.ConnCount
 		default: // sortByRx
-			return a.RxRate > b.RxRate
+			less = a.RxRate < b.RxRate
 		}
+		if asc {
+			return less
+		}
+		return !less
 	})
 }
 

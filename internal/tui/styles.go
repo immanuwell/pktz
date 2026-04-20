@@ -24,6 +24,12 @@ var (
 			Foreground(lipgloss.Color("#E5E7EB")).
 			Underline(true)
 
+	// Currently-active sort column header
+	activeHeaderStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("#A78BFA")).
+				Underline(true)
+
 	// Table rows
 	selectedStyle = lipgloss.NewStyle().
 			Background(lipgloss.Color("#5B21B6")).
