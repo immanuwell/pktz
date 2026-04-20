@@ -205,8 +205,12 @@ func (c *Collector) poll() {
 
 		p, ok := newProcs[pid]
 		if !ok {
-			// eBPF knows about this PID (recent traffic) but it has no open sockets
-			// in /proc/net right now (e.g., short-lived connection); show it anyway.
+			// Process has traffic in the eBPF map but no open sockets in /proc/net.
+			// Only show it if the PID still exists — otherwise the process has exited
+			// and we'd be displaying a ghost from the eBPF LRU map.
+			if _, err := os.Stat(fmt.Sprintf("/proc/%d", pid)); err != nil {
+				continue
+			}
 			p = &ProcessInfo{PID: pid, Comm: commFromProc(pid)}
 			if comm := nullTermString(pVal.Comm[:]); comm != "" {
 				p.Comm = comm
