@@ -263,11 +263,11 @@ func (c *Collector) poll() {
 		ebpfSrc := intToIP(cKey.Saddr)
 		ebpfDst := intToIP(cKey.Daddr)
 
-		// Find the matching /proc/net entry and update its rates, or append if new.
-		conns := newConnsByPID[cKey.Pid]
-		matched := false
-		for i := range conns {
-			conn := &conns[i]
+		// Overlay rates onto the matching /proc/net entry.
+		// If there is no match the connection is stale (closed but still in the
+		// eBPF LRU map) — skip it so counts stay consistent with /proc/net.
+		for i := range newConnsByPID[cKey.Pid] {
+			conn := &newConnsByPID[cKey.Pid][i]
 			if conn.Proto == proto &&
 				conn.SrcPort == cKey.Sport &&
 				conn.DstPort == cKey.Dport &&
@@ -277,20 +277,17 @@ func (c *Collector) poll() {
 				conn.TxRate = txRate
 				conn.RxTotal = cVal.RxBytes
 				conn.TxTotal = cVal.TxBytes
-				matched = true
 				break
 			}
 		}
-		if !matched {
-			conns = append(conns, ConnInfo{
-				SrcAddr: ebpfSrc, DstAddr: ebpfDst,
-				SrcPort: cKey.Sport, DstPort: cKey.Dport,
-				Proto:   proto,
-				RxRate:  rxRate, TxRate: txRate,
-				RxTotal: cVal.RxBytes, TxTotal: cVal.TxBytes,
-			})
+	}
+
+	// Sync ConnCount with the actual connection list length so the main page
+	// and the detail view always show the same number.
+	for pid, conns := range newConnsByPID {
+		if p, ok := newProcs[pid]; ok {
+			p.ConnCount = len(conns)
 		}
-		newConnsByPID[cKey.Pid] = conns
 	}
 
 	c.mu.Lock()

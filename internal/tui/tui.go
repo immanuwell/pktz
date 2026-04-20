@@ -87,6 +87,7 @@ type Model struct {
 	height      int
 	sortBy      sortKey
 	sortAsc     bool // true = A→Z / low→high, false = Z→A / high→low
+	pidColW     int  // dynamic: max PID digits in current list + 2
 	filterInput textinput.Model
 	filtering   bool
 	err         error
@@ -102,6 +103,7 @@ func New(c *collector.Collector) Model {
 		coll:        c,
 		sortBy:      sortByName,
 		sortAsc:     true, // default: alphabetical A→Z
+		pidColW:     5,    // minimum; grows dynamically with observed PIDs
 		filterInput: fi,
 	}
 }
@@ -133,6 +135,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case statsMsg:
 		m.procs = applyFilter(msg.procs, m.filterInput.Value())
 		sortProcs(m.procs, m.sortBy, m.sortAsc)
+		m.pidColW = calcPIDColWidth(msg.procs) // use full unfiltered list for width
 		m.conns = msg.conns
 		sortConns(m.conns)
 		if m.cursor >= len(m.procs) && len(m.procs) > 0 {
@@ -163,8 +166,9 @@ func (m Model) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 	}
 
 	// Walk column X ranges to find which header was clicked.
+	// Use effective cols so the PID column width matches what was rendered.
 	pos := 0
-	for i, w := range procListCols {
+	for i, w := range m.effectiveProcCols() {
 		if x >= pos && x < pos+w {
 			if i < len(procListSortKeys) {
 				m.applySort(procListSortKeys[i])
@@ -174,6 +178,14 @@ func (m Model) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 		pos += w
 	}
 	return m, nil
+}
+
+// effectiveProcCols returns the column widths with the dynamic PID column applied.
+func (m Model) effectiveProcCols() []int {
+	cols := make([]int, len(procListCols))
+	copy(cols, procListCols)
+	cols[0] = m.pidColW
+	return cols
 }
 
 // applySort sets the sort key; clicking the active key toggles direction,
@@ -308,6 +320,8 @@ func (m Model) renderTable() string {
 }
 
 func (m Model) renderProcTable() string {
+	cols := m.effectiveProcCols()
+
 	// Build header labels — annotate the active sort column with ▲ / ▼.
 	headers := make([]string, len(procListHeaders))
 	copy(headers, procListHeaders)
@@ -324,7 +338,7 @@ func (m Model) renderProcTable() string {
 
 	var sb strings.Builder
 	sb.WriteString("\n")
-	sb.WriteString(renderCells(headers, procListCols, headerStyle))
+	sb.WriteString(renderCells(headers, cols, headerStyle))
 	sb.WriteString("\n")
 	sb.WriteString(dimStyle.Render(strings.Repeat("─", m.width)))
 	sb.WriteString("\n")
@@ -347,7 +361,7 @@ func (m Model) renderProcTable() string {
 		txS := colourRate(p.TxRate).Render(formatBytes(p.TxRate) + "/s")
 		row := []string{
 			fmt.Sprintf("%d", p.PID),
-			truncate(p.Comm, procListCols[1]-1),
+			truncate(p.Comm, cols[1]-1),
 			rxS,
 			txS,
 			formatBytes(float64(p.RxTotal)),
@@ -360,7 +374,7 @@ func (m Model) renderProcTable() string {
 			style = selectedStyle
 			prefix = "▶ "
 		}
-		sb.WriteString(style.Render(prefix + renderCells(row, procListCols, style)))
+		sb.WriteString(style.Render(prefix + renderCells(row, cols, style)))
 		sb.WriteString("\n")
 	}
 	return sb.String()
@@ -508,7 +522,7 @@ func sortProcs(procs []collector.ProcessInfo, by sortKey, asc bool) {
 		case sortByTotal:
 			less = (a.RxTotal + a.TxTotal) < (b.RxTotal + b.TxTotal)
 		case sortByName:
-			less = a.Comm < b.Comm
+			less = strings.ToLower(a.Comm) < strings.ToLower(b.Comm)
 		case sortByPID:
 			less = a.PID < b.PID
 		case sortByConn:
@@ -554,4 +568,27 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// calcPIDColWidth returns max-PID-digit-count + 2, with a minimum of 5.
+func calcPIDColWidth(procs []collector.ProcessInfo) int {
+	w := 3 // width of the "PID" label itself
+	for _, p := range procs {
+		if d := digitCount(p.PID); d > w {
+			w = d
+		}
+	}
+	return w + 2
+}
+
+func digitCount(n uint32) int {
+	if n == 0 {
+		return 1
+	}
+	d := 0
+	for n > 0 {
+		d++
+		n /= 10
+	}
+	return d
 }
