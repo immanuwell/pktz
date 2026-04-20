@@ -76,21 +76,22 @@ type statsMsg struct {
 
 // Model is the root bubbletea model.
 type Model struct {
-	coll        *collector.Collector
-	activeView  view
-	procs       []collector.ProcessInfo
-	conns       []collector.ConnInfo
-	cursor      int
-	detailPID   uint32
-	detailComm  string
-	width       int
-	height      int
-	sortBy      sortKey
-	sortAsc     bool // true = A→Z / low→high, false = Z→A / high→low
-	pidColW     int  // dynamic: max PID digits in current list + 2
-	filterInput textinput.Model
-	filtering   bool
-	err         error
+	coll         *collector.Collector
+	activeView   view
+	procs        []collector.ProcessInfo
+	conns        []collector.ConnInfo
+	cursor       int
+	detailPID    uint32
+	detailComm   string
+	width        int
+	height       int
+	sortBy       sortKey
+	sortAsc      bool // true = A→Z / low→high, false = Z→A / high→low
+	pidColW      int  // dynamic: max PID digits in current list + 2
+	mouseEnabled bool // when false the terminal handles mouse natively (text select)
+	filterInput  textinput.Model
+	filtering    bool
+	err          error
 }
 
 // New creates a Model backed by the given collector.
@@ -100,11 +101,12 @@ func New(c *collector.Collector) Model {
 	fi.CharLimit = 32
 
 	return Model{
-		coll:        c,
-		sortBy:      sortByName,
-		sortAsc:     true, // default: alphabetical A→Z
-		pidColW:     5,    // minimum; grows dynamically with observed PIDs
-		filterInput: fi,
+		coll:         c,
+		sortBy:       sortByName,
+		sortAsc:      true, // default: alphabetical A→Z
+		pidColW:      5,    // minimum; grows dynamically with observed PIDs
+		mouseEnabled: true,
+		filterInput:  fi,
 	}
 }
 
@@ -143,7 +145,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.MouseMsg:
-		if msg.Action == tea.MouseActionRelease && msg.Button == tea.MouseButtonLeft {
+		if m.mouseEnabled && msg.Action == tea.MouseActionRelease && msg.Button == tea.MouseButtonLeft {
 			return m.handleMouseClick(msg.X, msg.Y)
 		}
 
@@ -242,6 +244,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.filterInput.Focus()
 			return m, textinput.Blink
 		}
+
+	case "m":
+		if m.mouseEnabled {
+			m.mouseEnabled = false
+			return m, func() tea.Msg { return tea.DisableMouse() }
+		}
+		m.mouseEnabled = true
+		return m, func() tea.Msg { return tea.EnableMouseCellMotion() }
 	}
 	return m, nil
 }
@@ -444,10 +454,14 @@ func (m Model) renderFooter() string {
 	}
 
 	var keys string
+	mouseHint := "m:disable mouse"
+	if !m.mouseEnabled {
+		mouseHint = "m:enable mouse"
+	}
 	if m.activeView == viewProcessList {
-		keys = helpStyle.Render("↑↓:nav  enter:detail  click header:sort  /:filter  s:sort  q:quit")
+		keys = helpStyle.Render(fmt.Sprintf("↑↓:nav  enter:detail  click:sort  /:filter  s:sort  %s  q:quit", mouseHint))
 	} else {
-		keys = helpStyle.Render("↑↓:nav  esc:back  q:quit")
+		keys = helpStyle.Render(fmt.Sprintf("↑↓:nav  esc:back  %s  q:quit", mouseHint))
 	}
 
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(keys)
