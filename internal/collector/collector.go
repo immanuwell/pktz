@@ -36,7 +36,8 @@ type ConnInfo struct {
 	SrcPort uint16
 	DstPort uint16
 	Proto   string
-	RxRate  float64
+	State   string  // e.g. "ESTABLISHED", "LISTEN", "" for UDP
+	RxRate  float64 // zero when no eBPF data available yet
 	TxRate  float64
 	RxTotal uint64
 	TxTotal uint64
@@ -54,17 +55,27 @@ type connSnapshot struct {
 	at      time.Time
 }
 
+// ebpfConnKey mirrors pktzConnKey but is comparable so it can be used as a map key.
+type ebpfConnKey struct {
+	pid   uint32
+	saddr uint32
+	daddr uint32
+	sport uint16
+	dport uint16
+	proto uint8
+}
+
 // Collector manages the eBPF programs and aggregates traffic data.
 type Collector struct {
 	objs  pktzObjects
 	links []link.Link
 
-	mu       sync.RWMutex
-	procs    map[uint32]*ProcessInfo
-	conns    map[pktzConnKey]*ConnInfo
+	mu          sync.RWMutex
+	procs       map[uint32]*ProcessInfo
+	connsByPID  map[uint32][]ConnInfo
 
 	prevProc map[uint32]procSnapshot
-	prevConn map[pktzConnKey]connSnapshot
+	prevConn map[ebpfConnKey]connSnapshot
 }
 
 // New loads the eBPF programs and attaches kprobes.
@@ -79,11 +90,11 @@ func New() (*Collector, error) {
 	}
 
 	c := &Collector{
-		objs:     objs,
-		procs:    make(map[uint32]*ProcessInfo),
-		conns:    make(map[pktzConnKey]*ConnInfo),
-		prevProc: make(map[uint32]procSnapshot),
-		prevConn: make(map[pktzConnKey]connSnapshot),
+		objs:        objs,
+		procs:       make(map[uint32]*ProcessInfo),
+		connsByPID:  make(map[uint32][]ConnInfo),
+		prevProc:    make(map[uint32]procSnapshot),
+		prevConn:    make(map[ebpfConnKey]connSnapshot),
 	}
 
 	// required probes — fatal if missing
@@ -104,7 +115,7 @@ func New() (*Collector, error) {
 		c.links = append(c.links, l)
 	}
 
-	// optional probes — silently skip if the symbol is absent on this kernel
+	// optional probes — silently skip if absent on this kernel
 	optional := []struct {
 		sym  string
 		prog *ebpf.Program
@@ -112,8 +123,7 @@ func New() (*Collector, error) {
 		{"skb_consume_udp", objs.KprobeSkbConsumeUdp},
 	}
 	for _, p := range optional {
-		l, err := link.Kprobe(p.sym, p.prog, nil)
-		if err == nil {
+		if l, err := link.Kprobe(p.sym, p.prog, nil); err == nil {
 			c.links = append(c.links, l)
 		}
 	}
@@ -121,7 +131,7 @@ func New() (*Collector, error) {
 	return c, nil
 }
 
-// Run polls eBPF maps every 500 ms. Call in a goroutine.
+// Run polls eBPF maps and /proc/net every 500 ms. Call in a goroutine.
 func (c *Collector) Run() {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
@@ -138,7 +148,7 @@ func (c *Collector) Close() {
 	c.objs.Close()
 }
 
-// Processes returns a snapshot of per-process stats sorted by caller.
+// Processes returns a snapshot of all processes with open network sockets.
 func (c *Collector) Processes() []ProcessInfo {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -149,108 +159,143 @@ func (c *Collector) Processes() []ProcessInfo {
 	return out
 }
 
-// Connections returns per-connection stats for a given PID.
+// Connections returns all connections for a given PID.
 func (c *Collector) Connections(pid uint32) []ConnInfo {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	var out []ConnInfo
-	for k, v := range c.conns {
-		if k.Pid == pid {
-			out = append(out, *v)
-		}
-	}
-	return out
+	return append([]ConnInfo(nil), c.connsByPID[pid]...)
 }
 
 func (c *Collector) poll() {
 	now := time.Now()
 
-	// --- process map ---
-	newProcs := make(map[uint32]*ProcessInfo)
+	// ── Step 1: /proc/net scan gives us ALL processes with open sockets ──────
+	rawConns := ScanNetConnections()
+
+	// Group by PID and build process map seeded from /proc
+	pidConns := make(map[uint32][]ProcConn, len(rawConns))
+	for _, rc := range rawConns {
+		pidConns[rc.PID] = append(pidConns[rc.PID], rc)
+	}
+
+	newProcs := make(map[uint32]*ProcessInfo, len(pidConns))
+	for pid, conns := range pidConns {
+		newProcs[pid] = &ProcessInfo{
+			PID:       pid,
+			Comm:      commFromProc(pid),
+			ConnCount: len(conns),
+		}
+	}
+
+	// ── Step 2: eBPF process map — overlay rates onto existing entries ────────
 	var pKey uint32
 	var pVal pktzProcStats
 	iter := c.objs.ProcStatsMap.Iterate()
 	for iter.Next(&pKey, &pVal) {
 		pid := pKey
-		comm := nullTermString(pVal.Comm[:])
-
-		// Enrich comm from /proc if short or empty
-		if comm == "" {
-			comm = commFromProc(pid)
-		}
-
 		prev := c.prevProc[pid]
 		dt := now.Sub(prev.at).Seconds()
-		var rxRate, txRate float64
-		if dt > 0 && prev.at != (time.Time{}) {
-			rxRate = float64(pVal.RxBytes-prev.rxBytes) / dt
-			txRate = float64(pVal.TxBytes-prev.txBytes) / dt
-			if rxRate < 0 {
-				rxRate = 0
-			}
-			if txRate < 0 {
-				txRate = 0
-			}
-		}
 
-		newProcs[pid] = &ProcessInfo{
-			PID:     pid,
-			Comm:    comm,
-			RxRate:  rxRate,
-			TxRate:  txRate,
-			RxTotal: pVal.RxBytes,
-			TxTotal: pVal.TxBytes,
+		var rxRate, txRate float64
+		if dt > 0 && !prev.at.IsZero() {
+			rxRate = clampPositive(float64(pVal.RxBytes-prev.rxBytes) / dt)
+			txRate = clampPositive(float64(pVal.TxBytes-prev.txBytes) / dt)
 		}
 		c.prevProc[pid] = procSnapshot{txBytes: pVal.TxBytes, rxBytes: pVal.RxBytes, at: now}
+
+		p, ok := newProcs[pid]
+		if !ok {
+			// eBPF knows about this PID (recent traffic) but it has no open sockets
+			// in /proc/net right now (e.g., short-lived connection); show it anyway.
+			p = &ProcessInfo{PID: pid, Comm: commFromProc(pid)}
+			if comm := nullTermString(pVal.Comm[:]); comm != "" {
+				p.Comm = comm
+			}
+			newProcs[pid] = p
+		}
+		p.RxRate = rxRate
+		p.TxRate = txRate
+		p.RxTotal = pVal.RxBytes
+		p.TxTotal = pVal.TxBytes
 	}
 
-	// --- connection map ---
-	newConns := make(map[pktzConnKey]*ConnInfo)
+	// ── Step 3: Build per-PID connection lists ────────────────────────────────
+	// Start with what /proc/net gave us (full coverage, no rates yet).
+	newConnsByPID := make(map[uint32][]ConnInfo, len(pidConns))
+	for pid, rawList := range pidConns {
+		cs := make([]ConnInfo, len(rawList))
+		for i, rc := range rawList {
+			cs[i] = ConnInfo{
+				SrcAddr: rc.SrcAddr,
+				DstAddr: rc.DstAddr,
+				SrcPort: rc.SrcPort,
+				DstPort: rc.DstPort,
+				Proto:   rc.Proto,
+				State:   rc.State,
+			}
+		}
+		newConnsByPID[pid] = cs
+	}
+
+	// Overlay eBPF per-connection rates.
 	var cKey pktzConnKey
 	var cVal pktzConnStats
 	iter2 := c.objs.ConnStatsMap.Iterate()
 	for iter2.Next(&cKey, &cVal) {
-		prev := c.prevConn[cKey]
-		dt := now.Sub(prev.at).Seconds()
-		var rxRate, txRate float64
-		if dt > 0 && prev.at != (time.Time{}) {
-			rxRate = float64(cVal.RxBytes-prev.rxBytes) / dt
-			txRate = float64(cVal.TxBytes-prev.txBytes) / dt
-			if rxRate < 0 {
-				rxRate = 0
-			}
-			if txRate < 0 {
-				txRate = 0
-			}
+		ek := ebpfConnKey{
+			pid: cKey.Pid, saddr: cKey.Saddr, daddr: cKey.Daddr,
+			sport: cKey.Sport, dport: cKey.Dport, proto: cKey.Proto,
 		}
+		prev := c.prevConn[ek]
+		dt := now.Sub(prev.at).Seconds()
+
+		var rxRate, txRate float64
+		if dt > 0 && !prev.at.IsZero() {
+			rxRate = clampPositive(float64(cVal.RxBytes-prev.rxBytes) / dt)
+			txRate = clampPositive(float64(cVal.TxBytes-prev.txBytes) / dt)
+		}
+		c.prevConn[ek] = connSnapshot{txBytes: cVal.TxBytes, rxBytes: cVal.RxBytes, at: now}
 
 		proto := "TCP"
 		if cKey.Proto == 17 {
 			proto = "UDP"
 		}
+		ebpfSrc := intToIP(cKey.Saddr)
+		ebpfDst := intToIP(cKey.Daddr)
 
-		newConns[cKey] = &ConnInfo{
-			SrcAddr: intToIP(cKey.Saddr),
-			DstAddr: intToIP(cKey.Daddr),
-			SrcPort: cKey.Sport,
-			DstPort: cKey.Dport,
-			Proto:   proto,
-			RxRate:  rxRate,
-			TxRate:  txRate,
-			RxTotal: cVal.RxBytes,
-			TxTotal: cVal.TxBytes,
+		// Find the matching /proc/net entry and update its rates, or append if new.
+		conns := newConnsByPID[cKey.Pid]
+		matched := false
+		for i := range conns {
+			conn := &conns[i]
+			if conn.Proto == proto &&
+				conn.SrcPort == cKey.Sport &&
+				conn.DstPort == cKey.Dport &&
+				conn.SrcAddr.Equal(ebpfSrc) &&
+				conn.DstAddr.Equal(ebpfDst) {
+				conn.RxRate = rxRate
+				conn.TxRate = txRate
+				conn.RxTotal = cVal.RxBytes
+				conn.TxTotal = cVal.TxBytes
+				matched = true
+				break
+			}
 		}
-		c.prevConn[cKey] = connSnapshot{txBytes: cVal.TxBytes, rxBytes: cVal.RxBytes, at: now}
-
-		// Tally connection count on process
-		if p, ok := newProcs[cKey.Pid]; ok {
-			p.ConnCount++
+		if !matched {
+			conns = append(conns, ConnInfo{
+				SrcAddr: ebpfSrc, DstAddr: ebpfDst,
+				SrcPort: cKey.Sport, DstPort: cKey.Dport,
+				Proto:   proto,
+				RxRate:  rxRate, TxRate: txRate,
+				RxTotal: cVal.RxBytes, TxTotal: cVal.TxBytes,
+			})
 		}
+		newConnsByPID[cKey.Pid] = conns
 	}
 
 	c.mu.Lock()
 	c.procs = newProcs
-	c.conns = newConns
+	c.connsByPID = newConnsByPID
 	c.mu.Unlock()
 }
 
@@ -258,6 +303,13 @@ func intToIP(n uint32) net.IP {
 	ip := make(net.IP, 4)
 	binary.LittleEndian.PutUint32(ip, n)
 	return ip
+}
+
+func clampPositive(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	return v
 }
 
 func nullTermString(b []int8) string {

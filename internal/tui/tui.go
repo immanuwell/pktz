@@ -83,7 +83,7 @@ func New(c *collector.Collector) Model {
 
 	return Model{
 		coll:        c,
-		sortBy:      sortByRx,
+		sortBy:      sortByName,
 		filterInput: fi,
 	}
 }
@@ -297,8 +297,8 @@ func (m Model) renderProcTable() string {
 }
 
 func (m Model) renderConnTable() string {
-	cols := []int{22, 22, 6, 11, 11, 11, 11}
-	headers := []string{"LOCAL", "REMOTE", "PROTO", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX"}
+	cols := []int{21, 21, 5, 13, 9, 9, 9, 9}
+	headers := []string{"LOCAL", "REMOTE", "PROTO", "STATE", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX"}
 
 	var sb strings.Builder
 	sb.WriteString("\n")
@@ -306,6 +306,12 @@ func (m Model) renderConnTable() string {
 	sb.WriteString("\n")
 	sb.WriteString(dimStyle.Render(strings.Repeat("─", m.width)))
 	sb.WriteString("\n")
+
+	if len(m.conns) == 0 {
+		sb.WriteString(dimStyle.Render("  no connections"))
+		sb.WriteString("\n")
+		return sb.String()
+	}
 
 	tableRows := m.height - 6
 	if tableRows < 1 {
@@ -325,6 +331,7 @@ func (m Model) renderConnTable() string {
 			fmt.Sprintf("%s:%d", c.SrcAddr, c.SrcPort),
 			fmt.Sprintf("%s:%d", c.DstAddr, c.DstPort),
 			protoStyle.Render(c.Proto),
+			truncate(c.State, cols[3]-1),
 			rxS,
 			txS,
 			formatBytes(float64(c.RxTotal)),
