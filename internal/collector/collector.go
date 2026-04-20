@@ -86,23 +86,36 @@ func New() (*Collector, error) {
 		prevConn: make(map[pktzConnKey]connSnapshot),
 	}
 
-	probes := []struct {
+	// required probes — fatal if missing
+	required := []struct {
 		sym  string
 		prog *ebpf.Program
 	}{
 		{"tcp_sendmsg", objs.KprobeTcpSendmsg},
 		{"tcp_cleanup_rbuf", objs.KprobeTcpCleanupRbuf},
 		{"udp_sendmsg", objs.KprobeUdpSendmsg},
-		{"skb_consume_udp", objs.KprobeSkbConsumeUdp},
 	}
-
-	for _, p := range probes {
+	for _, p := range required {
 		l, err := link.Kprobe(p.sym, p.prog, nil)
 		if err != nil {
 			c.Close()
 			return nil, fmt.Errorf("attach kprobe %s: %w", p.sym, err)
 		}
 		c.links = append(c.links, l)
+	}
+
+	// optional probes — silently skip if the symbol is absent on this kernel
+	optional := []struct {
+		sym  string
+		prog *ebpf.Program
+	}{
+		{"skb_consume_udp", objs.KprobeSkbConsumeUdp},
+	}
+	for _, p := range optional {
+		l, err := link.Kprobe(p.sym, p.prog, nil)
+		if err == nil {
+			c.links = append(c.links, l)
+		}
 	}
 
 	return c, nil

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 
@@ -9,7 +10,16 @@ import (
 	"github.com/immanuwell/pktz/internal/tui"
 )
 
+const version = "0.1.0"
+
 func main() {
+	ver := flag.Bool("version", false, "print version and exit")
+	flag.Parse()
+	if *ver {
+		fmt.Println("pktz", version)
+		return
+	}
+
 	if os.Geteuid() != 0 {
 		fmt.Fprintln(os.Stderr, "pktz requires root privileges (sudo pktz)")
 		os.Exit(1)

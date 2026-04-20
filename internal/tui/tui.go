@@ -259,6 +259,12 @@ func (m Model) renderProcTable() string {
 	sb.WriteString(dimStyle.Render(strings.Repeat("─", m.width)))
 	sb.WriteString("\n")
 
+	if len(m.procs) == 0 {
+		sb.WriteString(dimStyle.Render("  waiting for network traffic…"))
+		sb.WriteString("\n")
+		return sb.String()
+	}
+
 	tableRows := m.height - 6 // header + separator + footer + padding
 	if tableRows < 1 {
 		tableRows = 1
