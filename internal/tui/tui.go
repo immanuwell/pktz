@@ -113,7 +113,9 @@ func New(c *collector.Collector) Model {
 // --- Init ---
 
 func (m Model) Init() tea.Cmd {
-	return tickCmd()
+	// Fetch immediately so the first frame shows data rather than "waiting…".
+	// tickCmd starts the recurring 500 ms refresh cycle.
+	return tea.Batch(fetchStats(m.coll, m.detailPID, m.activeView), tickCmd())
 }
 
 func tickCmd() tea.Cmd {

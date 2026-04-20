@@ -32,6 +32,7 @@ func main() {
 	}
 	defer c.Close()
 
+	c.Poll() // populate maps before the TUI starts so the first frame has data
 	go c.Run()
 
 	p := tea.NewProgram(tui.New(c), tea.WithAltScreen(), tea.WithMouseCellMotion())

@@ -131,6 +131,12 @@ func New() (*Collector, error) {
 	return c, nil
 }
 
+// Poll performs one immediate data collection cycle.
+// Call it once synchronously before starting Run so the first display is instant.
+func (c *Collector) Poll() {
+	c.poll()
+}
+
 // Run polls eBPF maps and /proc/net every 500 ms. Call in a goroutine.
 func (c *Collector) Run() {
 	ticker := time.NewTicker(500 * time.Millisecond)
