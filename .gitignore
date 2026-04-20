@@ -1,7 +1,9 @@
 # Binaries
 pktz
-*.o
 *.a
+
+# Intermediate object files (not the eBPF objects embedded via bpf2go)
+*.test.o
 
 # Generated eBPF objects are committed, skip the vmlinux header
 bpf/vmlinux.h
