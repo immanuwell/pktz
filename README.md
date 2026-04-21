@@ -1,3 +1,11 @@
+packet-z
+
+![](media/screenshot-1.png)
+
+![](media/screenshot-2.png)
+
+![](media/screenshot-3.png)
+
 # pktz
 
 Your machine is talking to things right now. A lot of things. `pktz` tells you exactly who, how much, and to where — in real time.
