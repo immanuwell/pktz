@@ -12,8 +12,6 @@ Your machine is talking to things right now. A lot of things. `pktz` tells you e
 
 Built on eBPF, so it hooks straight into the kernel. No polling `/proc`. No sampling. Every byte, every process, no excuses.
 
-![demo placeholder]
-
 ---
 
 ## Install
