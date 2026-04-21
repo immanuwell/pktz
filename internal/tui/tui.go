@@ -95,6 +95,7 @@ type Model struct {
 	mouseEnabled bool // when false the terminal handles mouse natively (text select)
 	resolveNames bool // when true show hostname:service, when false show raw ip:port
 	compactIPv6  bool // when true shorten IPv6 to first:…:last
+	remoteColW   int  // high-watermark width of the REMOTE column; only grows
 	graphPID     uint32
 	graphName    string
 	history      []collector.HistoryEntry
@@ -118,6 +119,7 @@ func New(c *collector.Collector, res *resolver.Resolver) Model {
 		mouseEnabled: true,
 		resolveNames: true,
 		compactIPv6:  true,
+		remoteColW:   30,
 		filterInput:  fi,
 	}
 }
@@ -153,6 +155,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.conns = msg.conns
 		sortConns(m.conns)
 		m.history = msg.history
+		m.updateRemoteColW()
 		if m.cursor >= len(m.procs) && len(m.procs) > 0 {
 			m.cursor = len(m.procs) - 1
 		}
@@ -240,6 +243,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.detailComm = p.Comm
 			m.activeView = viewConnDetail
 			m.cursor = 0
+			m.remoteColW = 30 // reset watermark for the new process
 		}
 
 	case "esc", "backspace":
@@ -263,9 +267,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "r":
 		m.resolveNames = !m.resolveNames
+		m.updateRemoteColW()
 
 	case "v":
 		m.compactIPv6 = !m.compactIPv6
+		m.updateRemoteColW()
 
 	case "m":
 		if m.mouseEnabled {
@@ -306,6 +312,24 @@ func (m *Model) syncGraphPID() {
 	}
 	m.graphPID = m.procs[cur].PID
 	m.graphName = m.procs[cur].Comm
+}
+
+// updateRemoteColW measures the widest formatted remote address in the current
+// connection list and advances the high-watermark. Call whenever conns or
+// display settings change; the column never shrinks so the layout stays stable.
+func (m *Model) updateRemoteColW() {
+	const minW = 30
+	best := minW
+	for _, c := range m.conns {
+		s := formatAddr(c.DstAddr, c.DstPort, true, m.res, m.resolveNames, m.compactIPv6)
+		if w := lipgloss.Width(s); w > best {
+			best = w
+		}
+	}
+	best += 2 // breathing room between columns
+	if best > m.remoteColW {
+		m.remoteColW = best
+	}
 }
 
 // graphPanelHeight returns how many terminal rows the graph panel should occupy.
@@ -449,7 +473,7 @@ func (m Model) renderProcTable() string {
 }
 
 func (m Model) renderConnTable() string {
-	cols := []int{22, 30, 5, 13, 9, 9, 9, 9}
+	cols := []int{22, m.remoteColW, 5, 13, 9, 9, 9, 9}
 	headers := []string{"LOCAL", "REMOTE", "PROTO", "STATE", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX"}
 
 	var sb strings.Builder
