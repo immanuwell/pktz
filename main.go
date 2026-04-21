@@ -1,9 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
+	"sort"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/immanuwell/pktz/internal/collector"
@@ -17,6 +20,7 @@ const version = "0.1.0"
 func main() {
 	ver := flag.Bool("version", false, "print version and exit")
 	downloadDB := flag.Bool("download-geoip-db", false, "download DB-IP GeoLite databases (no account required) and exit")
+	logMode := flag.Bool("log", false, "emit newline-delimited JSON to stdout instead of starting the TUI")
 	flag.Parse()
 
 	if *ver {
@@ -41,8 +45,13 @@ func main() {
 	}
 	defer c.Close()
 
-	c.Poll() // populate maps before the TUI starts so the first frame has data
+	c.Poll()
 	go c.Run()
+
+	if *logMode {
+		runLog(c)
+		return
+	}
 
 	res := resolver.New()
 
@@ -62,6 +71,103 @@ func main() {
 		os.Exit(1)
 	}
 }
+
+// ── log mode ──────────────────────────────────────────────────────────────────
+
+type procRecord struct {
+	Type    string    `json:"type"`
+	Ts      time.Time `json:"ts"`
+	PID     uint32    `json:"pid"`
+	Comm    string    `json:"comm"`
+	RxBps   float64   `json:"rx_bps"`
+	TxBps   float64   `json:"tx_bps"`
+	RxBytes uint64    `json:"rx_bytes"`
+	TxBytes uint64    `json:"tx_bytes"`
+	Conns   int       `json:"conns"`
+}
+
+type connRecord struct {
+	Type    string    `json:"type"`
+	Ts      time.Time `json:"ts"`
+	PID     uint32    `json:"pid"`
+	Comm    string    `json:"comm"`
+	SrcIP   string    `json:"src_ip"`
+	SrcPort uint16    `json:"src_port"`
+	DstIP   string    `json:"dst_ip"`
+	DstPort uint16    `json:"dst_port"`
+	Proto   string    `json:"proto"`
+	State   string    `json:"state,omitempty"`
+	RxBps   float64   `json:"rx_bps"`
+	TxBps   float64   `json:"tx_bps"`
+	RxBytes uint64    `json:"rx_bytes"`
+	TxBytes uint64    `json:"tx_bytes"`
+}
+
+// runLog polls the collector every 500 ms and writes NDJSON to stdout.
+// It exits silently on a broken pipe (e.g. the consumer closed the pipe).
+func runLog(c *collector.Collector) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetEscapeHTML(false)
+
+	for range ticker.C {
+		now := time.Now().UTC()
+		procs := c.Processes()
+
+		sort.Slice(procs, func(i, j int) bool {
+			return (procs[i].RxRate + procs[i].TxRate) > (procs[j].RxRate + procs[j].TxRate)
+		})
+
+		for _, p := range procs {
+			if err := enc.Encode(procRecord{
+				Type:    "process",
+				Ts:      now,
+				PID:     p.PID,
+				Comm:    p.Comm,
+				RxBps:   p.RxRate,
+				TxBps:   p.TxRate,
+				RxBytes: p.RxTotal,
+				TxBytes: p.TxTotal,
+				Conns:   p.ConnCount,
+			}); err != nil {
+				return // broken pipe or closed stdout — exit cleanly
+			}
+
+			for _, conn := range c.Connections(p.PID) {
+				srcIP := ""
+				if conn.SrcAddr != nil {
+					srcIP = conn.SrcAddr.String()
+				}
+				dstIP := ""
+				if conn.DstAddr != nil {
+					dstIP = conn.DstAddr.String()
+				}
+				if err := enc.Encode(connRecord{
+					Type:    "conn",
+					Ts:      now,
+					PID:     p.PID,
+					Comm:    p.Comm,
+					SrcIP:   srcIP,
+					SrcPort: conn.SrcPort,
+					DstIP:   dstIP,
+					DstPort: conn.DstPort,
+					Proto:   conn.Proto,
+					State:   conn.State,
+					RxBps:   conn.RxRate,
+					TxBps:   conn.TxRate,
+					RxBytes: conn.RxTotal,
+					TxBytes: conn.TxTotal,
+				}); err != nil {
+					return
+				}
+			}
+		}
+	}
+}
+
+// ── download ──────────────────────────────────────────────────────────────────
 
 func runDownload() {
 	fmt.Println("Downloading DB-IP GeoLite databases (no account required, CC BY 4.0)…")
