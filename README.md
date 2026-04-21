@@ -16,17 +16,29 @@ Built on eBPF, so it hooks straight into the kernel. No polling `/proc`. No samp
 
 ---
 
-## Requirements
+## Install
 
-- Linux kernel 5.8+ (eBPF BTF support)
-- `bpftool`, `clang`, `libbpf-dev`
-- Go 1.22+
-
-## Build & install
+**Download a pre-built binary** (no Go required):
 
 ```bash
-make          # generates eBPF objects + builds the binary
-sudo mv pktz /usr/local/bin/
+# replace with your arch: amd64, arm64, armv7
+curl -Lo pktz https://github.com/immanuwell/pktz/releases/latest/download/pktz-linux-amd64
+chmod +x pktz && sudo mv pktz /usr/local/bin/
+```
+
+**Or with Go** (fetches + compiles in one shot):
+
+```bash
+go install github.com/immanuwell/pktz@latest
+```
+
+The eBPF objects are pre-compiled and bundled in the module, so no `clang` or `bpftool` needed.
+
+**Or build from source** (if you want to hack on it):
+
+```bash
+# requires: clang, libbpf-dev, bpftool, Go 1.22+, Linux kernel 5.8+
+make && sudo mv pktz /usr/local/bin/
 ```
 
 ## Usage
