@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/immanuwell/pktz/internal/collector"
+	"github.com/immanuwell/pktz/internal/demo"
 	"github.com/immanuwell/pktz/internal/geoip"
 	"github.com/immanuwell/pktz/internal/resolver"
 )
@@ -119,6 +120,7 @@ type Model struct {
 	remoteColW   int  // high-watermark width of the REMOTE column; only grows
 	geo          *geoip.DB
 	showGeo      bool // toggled with 'g'; true when DB is available
+	anon         *demo.Anonymizer
 	graphPID     uint32
 	graphName    string
 	history      []collector.HistoryEntry
@@ -127,9 +129,9 @@ type Model struct {
 	err          error
 }
 
-// New creates a Model backed by the given collector, resolver, and optional GeoIP DB.
-// geo may be nil if the databases have not been downloaded.
-func New(c *collector.Collector, res *resolver.Resolver, geo *geoip.DB) Model {
+// New creates a Model backed by the given collector, resolver, optional GeoIP DB,
+// and optional anonymizer (nil when not running in demo mode).
+func New(c *collector.Collector, res *resolver.Resolver, geo *geoip.DB, anon *demo.Anonymizer) Model {
 	fi := textinput.New()
 	fi.Placeholder = "filter…"
 	fi.CharLimit = 32
@@ -146,6 +148,7 @@ func New(c *collector.Collector, res *resolver.Resolver, geo *geoip.DB) Model {
 		remoteColW:   30,
 		geo:          geo,
 		showGeo:      geo != nil,
+		anon:         anon,
 		filterInput:  fi,
 	}
 }
@@ -153,7 +156,7 @@ func New(c *collector.Collector, res *resolver.Resolver, geo *geoip.DB) Model {
 // --- Init ---
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(fetchStats(m.coll, m.detailPID, m.activeView, m.graphPID), tickCmd())
+	return tea.Batch(fetchStats(m.coll, m.detailPID, m.activeView, m.graphPID, m.anon), tickCmd())
 }
 
 func tickCmd() tea.Cmd {
@@ -172,7 +175,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 	case tickMsg:
-		return m, tea.Batch(tickCmd(), fetchStats(m.coll, m.detailPID, m.activeView, m.graphPID))
+		return m, tea.Batch(tickCmd(), fetchStats(m.coll, m.detailPID, m.activeView, m.graphPID, m.anon))
 
 	case statsMsg:
 		m.procs = applyFilter(msg.procs, m.filterInput.Value())
@@ -384,7 +387,7 @@ func (m *Model) updateRemoteColW() {
 	const minW = 30
 	best := minW
 	for _, c := range m.conns {
-		s := formatAddr(c.DstAddr, c.DstPort, true, m.res, m.resolveNames, m.compactIPv6)
+		s := formatAddr(c.DstAddr, c.DstPort, true, m.res, m.resolveNames, m.compactIPv6, m.anon)
 		if w := lipgloss.Width(s); w > best {
 			best = w
 		}
@@ -414,12 +417,22 @@ func listLen(m Model) int {
 	return len(m.procs)
 }
 
-func fetchStats(c *collector.Collector, pid uint32, v view, graphPID uint32) tea.Cmd {
+func fetchStats(c *collector.Collector, pid uint32, v view, graphPID uint32, anon *demo.Anonymizer) tea.Cmd {
 	return func() tea.Msg {
 		procs := c.Processes()
+		if anon != nil {
+			procs = anon.Processes(procs)
+		}
 		var conns []collector.ConnInfo
 		if v == viewConnDetail {
-			conns = c.Connections(pid)
+			if anon != nil && anon.IsFakePID(pid) {
+				conns = anon.FakeConns(pid)
+			} else {
+				conns = c.Connections(pid)
+				if anon != nil {
+					conns = anon.Conns(conns)
+				}
+			}
 		}
 		return statsMsg{
 			procs:   procs,
@@ -573,8 +586,8 @@ func (m Model) renderConnTable() string {
 		txS := colourRate(c.TxRate).Render(formatBytes(c.TxRate) + "/s")
 
 		row := []string{
-			formatAddr(c.SrcAddr, c.SrcPort, false, m.res, m.resolveNames, m.compactIPv6),
-			formatAddr(c.DstAddr, c.DstPort, true, m.res, m.resolveNames, m.compactIPv6),
+			formatAddr(c.SrcAddr, c.SrcPort, false, m.res, m.resolveNames, m.compactIPv6, m.anon),
+			formatAddr(c.DstAddr, c.DstPort, true, m.res, m.resolveNames, m.compactIPv6, m.anon),
 		}
 		if m.showGeo {
 			row = append(row, renderGeo(m.geo.Lookup(c.DstAddr)))
@@ -618,7 +631,7 @@ func renderGeo(info geoip.Info) string {
 // resolveHost=true triggers reverse-DNS on the IP (used for remote addresses).
 // resolve=false bypasses both hostname and service-name resolution (raw mode).
 // compactV6=true shortens IPv6 addresses to first:…:last notation.
-func formatAddr(ip net.IP, port uint16, resolveHost bool, res *resolver.Resolver, resolve bool, compactV6 bool) string {
+func formatAddr(ip net.IP, port uint16, resolveHost bool, res *resolver.Resolver, resolve bool, compactV6 bool, anon *demo.Anonymizer) string {
 	var host string
 	switch {
 	case ip == nil:
@@ -626,10 +639,19 @@ func formatAddr(ip net.IP, port uint16, resolveHost bool, res *resolver.Resolver
 	case ip.IsUnspecified():
 		host = "*"
 	case resolveHost && resolve:
-		host = res.Hostname(ip)
-		// If the resolver returned a raw IPv6 (no PTR record), compact it too.
-		if compactV6 && len(ip) == 16 && host == ip.String() {
-			host = shortIPv6(ip)
+		var found bool
+		if anon != nil {
+			if h, ok := anon.HostnameFor(ip); ok {
+				host = h
+				found = true
+			}
+		}
+		if !found {
+			host = res.Hostname(ip)
+			// If the resolver returned a raw IPv6 (no PTR record), compact it too.
+			if compactV6 && len(ip) == 16 && host == ip.String() {
+				host = shortIPv6(ip)
+			}
 		}
 	default:
 		host = ip.String()

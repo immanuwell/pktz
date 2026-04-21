@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/immanuwell/pktz/internal/collector"
+	"github.com/immanuwell/pktz/internal/demo"
 	"github.com/immanuwell/pktz/internal/geoip"
 	"github.com/immanuwell/pktz/internal/resolver"
 	"github.com/immanuwell/pktz/internal/tui"
@@ -21,7 +23,27 @@ func main() {
 	ver := flag.Bool("version", false, "print version and exit")
 	downloadDB := flag.Bool("download-geoip-db", false, "download DB-IP GeoLite databases (no account required) and exit")
 	logMode := flag.Bool("log", false, "emit newline-delimited JSON to stdout instead of starting the TUI")
+	demoMode := flag.Bool("demo", false, "anonymize all IPs and hostnames for safe screen-sharing")
+	fakeProcsFlag := flag.String("fake-processes", "", "comma-separated list of fake process names to inject (implies --demo)")
 	flag.Parse()
+
+	var anon *demo.Anonymizer
+	if *demoMode || *fakeProcsFlag != "" {
+		var names []string
+		if *fakeProcsFlag != "" {
+			for _, n := range strings.Split(*fakeProcsFlag, ",") {
+				if n = strings.TrimSpace(n); n != "" {
+					names = append(names, n)
+				}
+			}
+		}
+		var err error
+		anon, err = demo.New(names)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "pktz: demo init: %v\n", err)
+			os.Exit(1)
+		}
+	}
 
 	if *ver {
 		fmt.Println("pktz", version)
@@ -49,7 +71,7 @@ func main() {
 	go c.Run()
 
 	if *logMode {
-		runLog(c)
+		runLog(c, anon)
 		return
 	}
 
@@ -65,7 +87,7 @@ func main() {
 		}
 	}
 
-	p := tea.NewProgram(tui.New(c, res, geo), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(tui.New(c, res, geo, anon), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "pktz: %v\n", err)
 		os.Exit(1)
@@ -105,7 +127,7 @@ type connRecord struct {
 
 // runLog polls the collector every 500 ms and writes NDJSON to stdout.
 // It exits silently on a broken pipe (e.g. the consumer closed the pipe).
-func runLog(c *collector.Collector) {
+func runLog(c *collector.Collector, anon *demo.Anonymizer) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -115,6 +137,9 @@ func runLog(c *collector.Collector) {
 	for range ticker.C {
 		now := time.Now().UTC()
 		procs := c.Processes()
+		if anon != nil {
+			procs = anon.Processes(procs)
+		}
 
 		sort.Slice(procs, func(i, j int) bool {
 			return (procs[i].RxRate + procs[i].TxRate) > (procs[j].RxRate + procs[j].TxRate)
@@ -135,7 +160,16 @@ func runLog(c *collector.Collector) {
 				return // broken pipe or closed stdout — exit cleanly
 			}
 
-			for _, conn := range c.Connections(p.PID) {
+			var connList []collector.ConnInfo
+			if anon != nil && anon.IsFakePID(p.PID) {
+				connList = anon.FakeConns(p.PID)
+			} else {
+				connList = c.Connections(p.PID)
+				if anon != nil {
+					connList = anon.Conns(connList)
+				}
+			}
+			for _, conn := range connList {
 				srcIP := ""
 				if conn.SrcAddr != nil {
 					srcIP = conn.SrcAddr.String()
