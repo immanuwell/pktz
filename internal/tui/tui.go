@@ -77,6 +77,25 @@ type statsMsg struct {
 	history []collector.HistoryEntry
 }
 
+// connID is a comparable 5-tuple that uniquely identifies a connection row.
+type connID struct {
+	srcAddr string
+	dstAddr string
+	srcPort uint16
+	dstPort uint16
+	proto   string
+}
+
+func makeConnID(c collector.ConnInfo) connID {
+	return connID{
+		srcAddr: c.SrcAddr.String(),
+		dstAddr: c.DstAddr.String(),
+		srcPort: c.SrcPort,
+		dstPort: c.DstPort,
+		proto:   c.Proto,
+	}
+}
+
 // Model is the root bubbletea model.
 type Model struct {
 	coll         *collector.Collector
@@ -85,6 +104,7 @@ type Model struct {
 	procs        []collector.ProcessInfo
 	conns        []collector.ConnInfo
 	cursor       int
+	pinnedConn   connID // identity of the connection the cursor is on; zero = not pinned
 	detailPID    uint32
 	detailComm   string
 	width        int
@@ -154,6 +174,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pidColW = calcPIDColWidth(msg.procs) // use full unfiltered list for width
 		m.conns = msg.conns
 		sortConns(m.conns)
+		m.restorePinnedConn()
 		m.history = msg.history
 		m.updateRemoteColW()
 		if m.cursor >= len(m.procs) && len(m.procs) > 0 {
@@ -228,12 +249,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cursor > 0 {
 			m.cursor--
 			m.syncGraphPID()
+			m.pinCursor()
 		}
 
 	case "down", "j":
 		if max := listLen(m) - 1; m.cursor < max {
 			m.cursor++
 			m.syncGraphPID()
+			m.pinCursor()
 		}
 
 	case "enter":
@@ -243,6 +266,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.detailComm = p.Comm
 			m.activeView = viewConnDetail
 			m.cursor = 0
+			m.pinnedConn = connID{}
 			m.remoteColW = 30 // reset watermark for the new process
 		}
 
@@ -250,6 +274,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.activeView == viewConnDetail {
 			m.activeView = viewProcessList
 			m.cursor = 0
+			m.pinnedConn = connID{}
 		}
 
 	case "s":
@@ -312,6 +337,33 @@ func (m *Model) syncGraphPID() {
 	}
 	m.graphPID = m.procs[cur].PID
 	m.graphName = m.procs[cur].Comm
+}
+
+// pinCursor records the identity of the connection currently under the cursor
+// so that restorePinnedConn can find it again after a re-sort.
+func (m *Model) pinCursor() {
+	if m.activeView == viewConnDetail && m.cursor < len(m.conns) {
+		m.pinnedConn = makeConnID(m.conns[m.cursor])
+	}
+}
+
+// restorePinnedConn moves m.cursor to the row that matches m.pinnedConn after
+// the connection list has been re-sorted. If the connection is no longer present
+// the cursor is clamped to the end of the list.
+func (m *Model) restorePinnedConn() {
+	if m.activeView != viewConnDetail || m.pinnedConn == (connID{}) {
+		return
+	}
+	for i, c := range m.conns {
+		if makeConnID(c) == m.pinnedConn {
+			m.cursor = i
+			return
+		}
+	}
+	// Connection disappeared (closed); clamp cursor.
+	if m.cursor >= len(m.conns) && len(m.conns) > 0 {
+		m.cursor = len(m.conns) - 1
+	}
 }
 
 // updateRemoteColW measures the widest formatted remote address in the current
