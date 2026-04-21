@@ -516,8 +516,8 @@ func (m Model) renderProcTable() string {
 		return sb.String()
 	}
 
-	// title(1) + col-header(1) + separator(1) + footer(2) + graph panel
-	tableRows := m.height - 5 - m.graphPanelHeight()
+	// title(1) + blank(1) + col-header(1) + separator(1) + blank(1) + footer(1) + blank(1) + graph panel
+	tableRows := m.height - 7 - m.graphPanelHeight()
 	if tableRows < 1 {
 		tableRows = 1
 	}
@@ -570,7 +570,8 @@ func (m Model) renderConnTable() string {
 		return sb.String()
 	}
 
-	tableRows := m.height - 5 - m.graphPanelHeight()
+	// same overhead as renderProcTable: title(1)+blank(1)+col-header(1)+separator(1)+blank(1)+footer(1)+blank(1)
+	tableRows := m.height - 7 - m.graphPanelHeight()
 	if tableRows < 1 {
 		tableRows = 1
 	}
@@ -756,6 +757,8 @@ func (m Model) renderGraphPanel() string {
 
 	if len(m.history) == 0 {
 		sb.WriteString(dimStyle.Render("  collecting data…"))
+		// Pad to the same height as the normal graph path so the table row budget stays stable.
+		sb.WriteString(strings.Repeat("\n", panelH-3))
 		return sb.String()
 	}
 
