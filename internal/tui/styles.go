@@ -54,6 +54,12 @@ var (
 			Foreground(lipgloss.Color("#F9FAFB")).
 			Background(lipgloss.Color("#374151")).
 			Padding(0, 1)
+
+	graphTitleStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#C4B5FD"))
+
+	graphRXStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#34D399"))
+	graphTXStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FCD34D"))
 )
 
 // colourRate picks a style based on magnitude (bytes/sec).

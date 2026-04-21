@@ -73,6 +73,7 @@ type Collector struct {
 	mu          sync.RWMutex
 	procs       map[uint32]*ProcessInfo
 	connsByPID  map[uint32][]ConnInfo
+	history     map[uint32][]HistoryEntry
 
 	prevProc map[uint32]procSnapshot
 	prevConn map[ebpfConnKey]connSnapshot
@@ -93,6 +94,7 @@ func New() (*Collector, error) {
 		objs:        objs,
 		procs:       make(map[uint32]*ProcessInfo),
 		connsByPID:  make(map[uint32][]ConnInfo),
+		history:     make(map[uint32][]HistoryEntry),
 		prevProc:    make(map[uint32]procSnapshot),
 		prevConn:    make(map[ebpfConnKey]connSnapshot),
 	}
@@ -163,6 +165,13 @@ func (c *Collector) Processes() []ProcessInfo {
 		out = append(out, *p)
 	}
 	return out
+}
+
+// History returns up to maxHistoryLen bandwidth samples for pid, oldest first.
+func (c *Collector) History(pid uint32) []HistoryEntry {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return append([]HistoryEntry(nil), c.history[pid]...)
 }
 
 // Connections returns all connections for a given PID.
@@ -298,6 +307,16 @@ func (c *Collector) poll() {
 		if p, ok := newProcs[pid]; ok {
 			p.ConnCount = len(conns)
 		}
+	}
+
+	// Append one history entry per active process.
+	for pid, p := range newProcs {
+		h := c.history[pid]
+		h = append(h, HistoryEntry{RxRate: p.RxRate, TxRate: p.TxRate})
+		if len(h) > maxHistoryLen {
+			h = h[len(h)-maxHistoryLen:]
+		}
+		c.history[pid] = h
 	}
 
 	c.mu.Lock()

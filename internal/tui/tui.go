@@ -72,8 +72,9 @@ type tickMsg time.Time
 
 // statsMsg carries freshly fetched data from the collector.
 type statsMsg struct {
-	procs []collector.ProcessInfo
-	conns []collector.ConnInfo
+	procs   []collector.ProcessInfo
+	conns   []collector.ConnInfo
+	history []collector.HistoryEntry
 }
 
 // Model is the root bubbletea model.
@@ -93,6 +94,9 @@ type Model struct {
 	pidColW      int  // dynamic: max PID digits in current list + 2
 	mouseEnabled bool // when false the terminal handles mouse natively (text select)
 	resolveNames bool // when true show hostname:service, when false show raw ip:port
+	graphPID     uint32
+	graphName    string
+	history      []collector.HistoryEntry
 	filterInput  textinput.Model
 	filtering    bool
 	err          error
@@ -119,9 +123,7 @@ func New(c *collector.Collector, res *resolver.Resolver) Model {
 // --- Init ---
 
 func (m Model) Init() tea.Cmd {
-	// Fetch immediately so the first frame shows data rather than "waiting…".
-	// tickCmd starts the recurring 500 ms refresh cycle.
-	return tea.Batch(fetchStats(m.coll, m.detailPID, m.activeView), tickCmd())
+	return tea.Batch(fetchStats(m.coll, m.detailPID, m.activeView, m.graphPID), tickCmd())
 }
 
 func tickCmd() tea.Cmd {
@@ -140,7 +142,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 	case tickMsg:
-		return m, tea.Batch(tickCmd(), fetchStats(m.coll, m.detailPID, m.activeView))
+		return m, tea.Batch(tickCmd(), fetchStats(m.coll, m.detailPID, m.activeView, m.graphPID))
 
 	case statsMsg:
 		m.procs = applyFilter(msg.procs, m.filterInput.Value())
@@ -148,9 +150,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pidColW = calcPIDColWidth(msg.procs) // use full unfiltered list for width
 		m.conns = msg.conns
 		sortConns(m.conns)
+		m.history = msg.history
 		if m.cursor >= len(m.procs) && len(m.procs) > 0 {
 			m.cursor = len(m.procs) - 1
 		}
+		m.syncGraphPID()
 
 	case tea.MouseMsg:
 		if m.mouseEnabled && msg.Action == tea.MouseActionRelease && msg.Button == tea.MouseButtonLeft {
@@ -218,11 +222,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
+			m.syncGraphPID()
 		}
 
 	case "down", "j":
 		if max := listLen(m) - 1; m.cursor < max {
 			m.cursor++
+			m.syncGraphPID()
 		}
 
 	case "enter":
@@ -279,6 +285,36 @@ func (m Model) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// syncGraphPID keeps graphPID/graphName aligned with the current cursor.
+func (m *Model) syncGraphPID() {
+	if m.activeView == viewConnDetail {
+		m.graphPID = m.detailPID
+		m.graphName = m.detailComm
+		return
+	}
+	if len(m.procs) == 0 {
+		return
+	}
+	cur := m.cursor
+	if cur >= len(m.procs) {
+		cur = len(m.procs) - 1
+	}
+	m.graphPID = m.procs[cur].PID
+	m.graphName = m.procs[cur].Comm
+}
+
+// graphPanelHeight returns how many terminal rows the graph panel should occupy.
+func (m Model) graphPanelHeight() int {
+	h := m.height * 30 / 100
+	if h < 8 {
+		h = 8
+	}
+	if h > 14 {
+		h = 14
+	}
+	return h
+}
+
 func listLen(m Model) int {
 	if m.activeView == viewConnDetail {
 		return len(m.conns)
@@ -286,14 +322,18 @@ func listLen(m Model) int {
 	return len(m.procs)
 }
 
-func fetchStats(c *collector.Collector, pid uint32, v view) tea.Cmd {
+func fetchStats(c *collector.Collector, pid uint32, v view, graphPID uint32) tea.Cmd {
 	return func() tea.Msg {
 		procs := c.Processes()
 		var conns []collector.ConnInfo
 		if v == viewConnDetail {
 			conns = c.Connections(pid)
 		}
-		return statsMsg{procs: procs, conns: conns}
+		return statsMsg{
+			procs:   procs,
+			conns:   conns,
+			history: c.History(graphPID),
+		}
 	}
 }
 
@@ -304,11 +344,12 @@ func (m Model) View() string {
 		return errorStyle.Render("error: "+m.err.Error()) + "\n"
 	}
 
-	var sections []string
-	sections = append(sections, m.renderHeader())
-	sections = append(sections, m.renderTable())
-	sections = append(sections, m.renderFooter())
-	return lipgloss.JoinVertical(lipgloss.Left, sections...)
+	return lipgloss.JoinVertical(lipgloss.Left,
+		m.renderHeader(),
+		m.renderTable(),
+		m.renderFooter(),
+		m.renderGraphPanel(),
+	)
 }
 
 func (m Model) renderHeader() string {
@@ -370,7 +411,8 @@ func (m Model) renderProcTable() string {
 		return sb.String()
 	}
 
-	tableRows := m.height - 6
+	// title(1) + col-header(1) + separator(1) + footer(2) + graph panel
+	tableRows := m.height - 5 - m.graphPanelHeight()
 	if tableRows < 1 {
 		tableRows = 1
 	}
@@ -418,7 +460,7 @@ func (m Model) renderConnTable() string {
 		return sb.String()
 	}
 
-	tableRows := m.height - 6
+	tableRows := m.height - 5 - m.graphPanelHeight()
 	if tableRows < 1 {
 		tableRows = 1
 	}
@@ -509,6 +551,58 @@ func (m Model) renderFooter() string {
 		gap = 1
 	}
 	return "\n" + left + strings.Repeat(" ", gap) + keys
+}
+
+func (m Model) renderGraphPanel() string {
+	panelH := m.graphPanelHeight()
+	if m.width <= 0 || panelH <= 0 || m.graphPID == 0 {
+		return strings.Repeat("\n", panelH)
+	}
+
+	chartH := (panelH - 4) / 2
+	if chartH < 1 {
+		chartH = 1
+	}
+
+	var currentRX, currentTX float64
+	if len(m.history) > 0 {
+		last := m.history[len(m.history)-1]
+		currentRX = last.RxRate
+		currentTX = last.TxRate
+	}
+
+	name := m.graphName
+	if name == "" {
+		name = fmt.Sprintf("pid %d", m.graphPID)
+	}
+
+	titleText := fmt.Sprintf(" ▸ %s  (pid %d)   RX %s/s   TX %s/s   [5 min]",
+		name, m.graphPID, formatBytes(currentRX), formatBytes(currentTX))
+
+	separator := dimStyle.Render(strings.Repeat("─", m.width))
+	title := graphTitleStyle.Render(titleText)
+
+	var sb strings.Builder
+	sb.WriteString(separator + "\n")
+	sb.WriteString(title + "\n")
+
+	if len(m.history) == 0 {
+		sb.WriteString(dimStyle.Render("  collecting data…"))
+		return sb.String()
+	}
+
+	rxData := make([]float64, len(m.history))
+	txData := make([]float64, len(m.history))
+	for i, h := range m.history {
+		rxData[i] = h.RxRate
+		txData[i] = h.TxRate
+	}
+
+	sb.WriteString(graphRXStyle.Render(" RX") + "\n")
+	sb.WriteString(renderGraph(rxData, m.width, chartH, "#34D399") + "\n")
+	sb.WriteString(graphTXStyle.Render(" TX") + "\n")
+	sb.WriteString(renderGraph(txData, m.width, chartH, "#FCD34D"))
+	return sb.String()
 }
 
 // --- helpers ---
