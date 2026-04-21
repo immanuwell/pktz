@@ -1,41 +1,43 @@
 package geoip
 
 import (
-	"archive/tar"
 	"compress/gzip"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
+	"time"
 )
 
-const maxmindURL = "https://download.maxmind.com/app/geoip_download?edition_id=%s&license_key=%s&suffix=tar.gz"
+// DB-IP.com publishes free MMDB databases monthly at a predictable URL.
+// No registration or license key required (CC BY 4.0).
+const dbipURL = "https://download.db-ip.com/free/dbip-%s-lite-%s.mmdb.gz"
 
-// Download fetches both GeoLite2-Country and GeoLite2-ASN databases using the
-// provided MaxMind license key and saves the MMDB files to DataDir.
-// progress is called with each status line (suitable for fmt.Println).
-func Download(licenseKey string, progress func(string)) error {
+// Download fetches both DB-IP Country Lite and ASN Lite databases and saves
+// the MMDB files to DataDir. progress is called with each status line.
+func Download(progress func(string)) error {
 	dir := DataDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create data dir %s: %w", dir, err)
 	}
 
+	yearMonth := time.Now().Format("2006-01")
+
 	editions := []struct {
-		id   string
+		slug string
 		file string
 	}{
-		{"GeoLite2-Country", countryDBName},
-		{"GeoLite2-ASN", asnDBName},
+		{"country", countryDBName},
+		{"asn", asnDBName},
 	}
 
 	for _, e := range editions {
-		progress(fmt.Sprintf("Downloading %s…", e.id))
-		url := fmt.Sprintf(maxmindURL, e.id, licenseKey)
+		url := fmt.Sprintf(dbipURL, e.slug, yearMonth)
 		dest := filepath.Join(dir, e.file)
+		progress(fmt.Sprintf("Downloading db-ip %s lite (%s)…", e.slug, yearMonth))
 		if err := fetchMMDB(url, dest); err != nil {
-			return fmt.Errorf("%s: %w", e.id, err)
+			return fmt.Errorf("%s: %w", e.slug, err)
 		}
 		fi, _ := os.Stat(dest)
 		size := ""
@@ -47,8 +49,7 @@ func Download(licenseKey string, progress func(string)) error {
 	return nil
 }
 
-// fetchMMDB downloads a MaxMind tar.gz archive and extracts the first .mmdb
-// file found inside it to dest.
+// fetchMMDB downloads a gzip-compressed MMDB file and decompresses it to dest.
 func fetchMMDB(url, dest string) error {
 	resp, err := http.Get(url) //nolint:gosec
 	if err != nil {
@@ -57,7 +58,7 @@ func fetchMMDB(url, dest string) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d — verify your license key at maxmind.com", resp.StatusCode)
+		return fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)
 	}
 
 	gz, err := gzip.NewReader(resp.Body)
@@ -66,28 +67,14 @@ func fetchMMDB(url, dest string) error {
 	}
 	defer gz.Close()
 
-	tr := tar.NewReader(gz)
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("tar: %w", err)
-		}
-		if hdr.Typeflag != tar.TypeReg {
-			continue
-		}
-		if !strings.HasSuffix(hdr.Name, ".mmdb") {
-			continue
-		}
-		f, err := os.Create(dest)
-		if err != nil {
-			return err
-		}
-		_, err = io.Copy(f, tr)
-		f.Close()
+	f, err := os.Create(dest)
+	if err != nil {
 		return err
 	}
-	return fmt.Errorf(".mmdb not found inside archive")
+	_, err = io.Copy(f, gz)
+	f.Close()
+	if err != nil {
+		os.Remove(dest)
+	}
+	return err
 }
