@@ -559,7 +559,7 @@ func (m Model) renderGraphPanel() string {
 		return strings.Repeat("\n", panelH)
 	}
 
-	chartH := (panelH - 4) / 2
+	chartH := (panelH - 6) / 2
 	if chartH < 1 {
 		chartH = 1
 	}
@@ -601,7 +601,8 @@ func (m Model) renderGraphPanel() string {
 	sb.WriteString(graphRXStyle.Render(" RX") + "\n")
 	sb.WriteString(renderGraph(rxData, m.width, chartH, "#34D399") + "\n")
 	sb.WriteString(graphTXStyle.Render(" TX") + "\n")
-	sb.WriteString(renderGraph(txData, m.width, chartH, "#FCD34D"))
+	sb.WriteString(renderGraph(txData, m.width, chartH, "#FCD34D") + "\n")
+	sb.WriteString(renderTimeAxis(m.width, len(m.history), time.Now()))
 	return sb.String()
 }
 

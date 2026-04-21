@@ -2,6 +2,7 @@ package tui
 
 import (
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -58,6 +59,61 @@ func renderGraph(data []float64, width, graphH int, clr lipgloss.Color) string {
 		rows[r] = style.Render(sb.String())
 	}
 	return strings.Join(rows, "\n")
+}
+
+// renderTimeAxis builds two rows: tick marks ('|') and timestamp labels below them.
+// numSamples is the actual number of history entries (500ms each); now is the current time.
+func renderTimeAxis(width, numSamples int, now time.Time) string {
+	if width <= 0 {
+		return "\n"
+	}
+
+	const numTicks = 10
+	displayedDuration := time.Duration(numSamples) * 500 * time.Millisecond
+
+	tickRow := make([]byte, width)
+	for i := range tickRow {
+		tickRow[i] = ' '
+	}
+	labelRow := make([]byte, width)
+	for i := range labelRow {
+		labelRow[i] = ' '
+	}
+
+	lastLabelEnd := -1
+	for i := 0; i < numTicks; i++ {
+		pos := i * (width - 1) / (numTicks - 1)
+		tickRow[pos] = '|'
+
+		var label string
+		if displayedDuration > 0 {
+			frac := float64(width-1-pos) / float64(width-1)
+			age := time.Duration(frac * float64(displayedDuration))
+			label = now.Add(-age).Format("15:04:05")
+		} else {
+			label = now.Format("15:04:05")
+		}
+
+		lStart := pos - len(label)/2
+		if lStart < 0 {
+			lStart = 0
+		}
+		if lStart+len(label) > width {
+			lStart = width - len(label)
+		}
+		if lStart < 0 || lStart <= lastLabelEnd {
+			continue
+		}
+		end := lStart + len(label)
+		if end > width {
+			end = width
+		}
+		copy(labelRow[lStart:end], []byte(label)[:end-lStart])
+		lastLabelEnd = end
+	}
+
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
+	return style.Render(string(tickRow)) + "\n" + style.Render(string(labelRow))
 }
 
 // fitToWidth maps data onto exactly width columns.
