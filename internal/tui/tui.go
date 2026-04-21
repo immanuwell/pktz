@@ -92,6 +92,7 @@ type Model struct {
 	sortAsc      bool // true = A→Z / low→high, false = Z→A / high→low
 	pidColW      int  // dynamic: max PID digits in current list + 2
 	mouseEnabled bool // when false the terminal handles mouse natively (text select)
+	resolveNames bool // when true show hostname:service, when false show raw ip:port
 	filterInput  textinput.Model
 	filtering    bool
 	err          error
@@ -110,6 +111,7 @@ func New(c *collector.Collector, res *resolver.Resolver) Model {
 		sortAsc:      true, // default: alphabetical A→Z
 		pidColW:      5,    // minimum; grows dynamically with observed PIDs
 		mouseEnabled: true,
+		resolveNames: true,
 		filterInput:  fi,
 	}
 }
@@ -250,6 +252,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.filterInput.Focus()
 			return m, textinput.Blink
 		}
+
+	case "r":
+		m.resolveNames = !m.resolveNames
 
 	case "m":
 		if m.mouseEnabled {
@@ -428,8 +433,8 @@ func (m Model) renderConnTable() string {
 		rxS := colourRate(c.RxRate).Render(formatBytes(c.RxRate) + "/s")
 		txS := colourRate(c.TxRate).Render(formatBytes(c.TxRate) + "/s")
 		row := []string{
-			formatAddr(c.SrcAddr, c.SrcPort, false, m.res),
-			formatAddr(c.DstAddr, c.DstPort, true, m.res),
+			formatAddr(c.SrcAddr, c.SrcPort, false, m.res, m.resolveNames),
+			formatAddr(c.DstAddr, c.DstPort, true, m.res, m.resolveNames),
 			protoStyle.Render(c.Proto),
 			truncate(c.State, cols[3]-1),
 			rxS,
@@ -451,24 +456,27 @@ func (m Model) renderConnTable() string {
 
 // formatAddr formats an IP:port pair for display.
 // resolveHost=true triggers reverse-DNS on the IP (used for remote addresses).
-func formatAddr(ip net.IP, port uint16, resolveHost bool, res *resolver.Resolver) string {
+// resolve=false bypasses both hostname and service-name resolution (raw mode).
+func formatAddr(ip net.IP, port uint16, resolveHost bool, res *resolver.Resolver, resolve bool) string {
 	var host string
 	switch {
 	case ip == nil:
 		host = "?"
 	case ip.IsUnspecified():
 		host = "*"
-	case resolveHost:
+	case resolveHost && resolve:
 		host = res.Hostname(ip)
 	default:
 		host = ip.String()
 	}
 
-	svc := resolver.ServiceName(port)
 	if port == 0 {
 		return host
 	}
-	return host + ":" + svc
+	if resolve {
+		return host + ":" + resolver.ServiceName(port)
+	}
+	return fmt.Sprintf("%s:%d", host, port)
 }
 
 func (m Model) renderFooter() string {
@@ -486,10 +494,14 @@ func (m Model) renderFooter() string {
 	if !m.mouseEnabled {
 		mouseHint = "m:enable mouse"
 	}
+	resolveHint := "r:raw view"
+	if !m.resolveNames {
+		resolveHint = "r:resolve names"
+	}
 	if m.activeView == viewProcessList {
 		keys = helpStyle.Render(fmt.Sprintf("↑↓:nav  enter:detail  click:sort  /:filter  s:sort  %s  q:quit", mouseHint))
 	} else {
-		keys = helpStyle.Render(fmt.Sprintf("↑↓:nav  esc:back  %s  q:quit", mouseHint))
+		keys = helpStyle.Render(fmt.Sprintf("↑↓:nav  esc:back  %s  %s  q:quit", resolveHint, mouseHint))
 	}
 
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(keys)
