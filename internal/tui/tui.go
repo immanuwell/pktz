@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/immanuwell/pktz/internal/collector"
+	"github.com/immanuwell/pktz/internal/geoip"
 	"github.com/immanuwell/pktz/internal/resolver"
 )
 
@@ -116,6 +117,8 @@ type Model struct {
 	resolveNames bool // when true show hostname:service, when false show raw ip:port
 	compactIPv6  bool // when true shorten IPv6 to first:…:last
 	remoteColW   int  // high-watermark width of the REMOTE column; only grows
+	geo          *geoip.DB
+	showGeo      bool // toggled with 'g'; true when DB is available
 	graphPID     uint32
 	graphName    string
 	history      []collector.HistoryEntry
@@ -124,8 +127,9 @@ type Model struct {
 	err          error
 }
 
-// New creates a Model backed by the given collector and resolver.
-func New(c *collector.Collector, res *resolver.Resolver) Model {
+// New creates a Model backed by the given collector, resolver, and optional GeoIP DB.
+// geo may be nil if the databases have not been downloaded.
+func New(c *collector.Collector, res *resolver.Resolver, geo *geoip.DB) Model {
 	fi := textinput.New()
 	fi.Placeholder = "filter…"
 	fi.CharLimit = 32
@@ -140,6 +144,8 @@ func New(c *collector.Collector, res *resolver.Resolver) Model {
 		resolveNames: true,
 		compactIPv6:  true,
 		remoteColW:   30,
+		geo:          geo,
+		showGeo:      geo != nil,
 		filterInput:  fi,
 	}
 }
@@ -297,6 +303,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "v":
 		m.compactIPv6 = !m.compactIPv6
 		m.updateRemoteColW()
+
+	case "g":
+		if m.geo != nil {
+			m.showGeo = !m.showGeo
+		}
 
 	case "m":
 		if m.mouseEnabled {
@@ -525,8 +536,13 @@ func (m Model) renderProcTable() string {
 }
 
 func (m Model) renderConnTable() string {
+	// Build column list dynamically — GEO column inserted after REMOTE when active.
 	cols := []int{22, m.remoteColW, 5, 13, 9, 9, 9, 9}
 	headers := []string{"LOCAL", "REMOTE", "PROTO", "STATE", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX"}
+	if m.showGeo {
+		cols = []int{22, m.remoteColW, 20, 5, 13, 9, 9, 9, 9}
+		headers = []string{"LOCAL", "REMOTE", "GEO", "PROTO", "STATE", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX"}
+	}
 
 	var sb strings.Builder
 	sb.WriteString("\n")
@@ -555,16 +571,23 @@ func (m Model) renderConnTable() string {
 		}
 		rxS := colourRate(c.RxRate).Render(formatBytes(c.RxRate) + "/s")
 		txS := colourRate(c.TxRate).Render(formatBytes(c.TxRate) + "/s")
+
 		row := []string{
 			formatAddr(c.SrcAddr, c.SrcPort, false, m.res, m.resolveNames, m.compactIPv6),
 			formatAddr(c.DstAddr, c.DstPort, true, m.res, m.resolveNames, m.compactIPv6),
+		}
+		if m.showGeo {
+			row = append(row, renderGeo(m.geo.Lookup(c.DstAddr)))
+		}
+		row = append(row,
 			protoStyle.Render(c.Proto),
-			truncate(c.State, cols[3]-1),
+			truncate(c.State, cols[len(row)]-1),
 			rxS,
 			txS,
 			formatBytes(float64(c.RxTotal)),
 			formatBytes(float64(c.TxTotal)),
-		}
+		)
+
 		style := normalStyle
 		prefix := "  "
 		if i == m.cursor {
@@ -575,6 +598,20 @@ func (m Model) renderConnTable() string {
 		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+// renderGeo formats a geoip.Info into a fixed-width "🇺🇸 GOOGLE" string.
+func renderGeo(info geoip.Info) string {
+	if info.IsZero() {
+		return ""
+	}
+	if info.Flag == "" {
+		return dimStyle.Render(info.Org)
+	}
+	if info.Org == "" {
+		return info.Flag
+	}
+	return info.Flag + " " + dimStyle.Render(info.Org)
 }
 
 // formatAddr formats an IP:port pair for display.
@@ -644,7 +681,15 @@ func (m Model) renderFooter() string {
 	if m.activeView == viewProcessList {
 		keys = helpStyle.Render(fmt.Sprintf("↑↓:nav  enter:detail  click:sort  /:filter  s:sort  %s  q:quit", mouseHint))
 	} else {
-		keys = helpStyle.Render(fmt.Sprintf("↑↓:nav  esc:back  %s  %s  %s  q:quit", resolveHint, ipv6Hint, mouseHint))
+		geoHint := ""
+		if m.geo != nil {
+			if m.showGeo {
+				geoHint = "  g:hide geo"
+			} else {
+				geoHint = "  g:show geo"
+			}
+		}
+		keys = helpStyle.Render(fmt.Sprintf("↑↓:nav  esc:back  %s  %s%s  %s  q:quit", resolveHint, ipv6Hint, geoHint, mouseHint))
 	}
 
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(keys)
