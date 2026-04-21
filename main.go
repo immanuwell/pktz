@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/immanuwell/pktz/internal/collector"
+	"github.com/immanuwell/pktz/internal/resolver"
 	"github.com/immanuwell/pktz/internal/tui"
 )
 
@@ -35,7 +36,8 @@ func main() {
 	c.Poll() // populate maps before the TUI starts so the first frame has data
 	go c.Run()
 
-	p := tea.NewProgram(tui.New(c), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	res := resolver.New()
+	p := tea.NewProgram(tui.New(c, res), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "pktz: %v\n", err)
 		os.Exit(1)

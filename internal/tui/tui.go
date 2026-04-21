@@ -3,6 +3,7 @@ package tui
 
 import (
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/immanuwell/pktz/internal/collector"
+	"github.com/immanuwell/pktz/internal/resolver"
 )
 
 // view identifies which screen is active.
@@ -77,6 +79,7 @@ type statsMsg struct {
 // Model is the root bubbletea model.
 type Model struct {
 	coll         *collector.Collector
+	res          *resolver.Resolver
 	activeView   view
 	procs        []collector.ProcessInfo
 	conns        []collector.ConnInfo
@@ -94,14 +97,15 @@ type Model struct {
 	err          error
 }
 
-// New creates a Model backed by the given collector.
-func New(c *collector.Collector) Model {
+// New creates a Model backed by the given collector and resolver.
+func New(c *collector.Collector, res *resolver.Resolver) Model {
 	fi := textinput.New()
 	fi.Placeholder = "filter…"
 	fi.CharLimit = 32
 
 	return Model{
 		coll:         c,
+		res:          res,
 		sortBy:       sortByName,
 		sortAsc:      true, // default: alphabetical A→Z
 		pidColW:      5,    // minimum; grows dynamically with observed PIDs
@@ -393,7 +397,7 @@ func (m Model) renderProcTable() string {
 }
 
 func (m Model) renderConnTable() string {
-	cols := []int{21, 21, 5, 13, 9, 9, 9, 9}
+	cols := []int{22, 30, 5, 13, 9, 9, 9, 9}
 	headers := []string{"LOCAL", "REMOTE", "PROTO", "STATE", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX"}
 
 	var sb strings.Builder
@@ -424,8 +428,8 @@ func (m Model) renderConnTable() string {
 		rxS := colourRate(c.RxRate).Render(formatBytes(c.RxRate) + "/s")
 		txS := colourRate(c.TxRate).Render(formatBytes(c.TxRate) + "/s")
 		row := []string{
-			fmt.Sprintf("%s:%d", c.SrcAddr, c.SrcPort),
-			fmt.Sprintf("%s:%d", c.DstAddr, c.DstPort),
+			formatAddr(c.SrcAddr, c.SrcPort, false, m.res),
+			formatAddr(c.DstAddr, c.DstPort, true, m.res),
 			protoStyle.Render(c.Proto),
 			truncate(c.State, cols[3]-1),
 			rxS,
@@ -443,6 +447,28 @@ func (m Model) renderConnTable() string {
 		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+// formatAddr formats an IP:port pair for display.
+// resolveHost=true triggers reverse-DNS on the IP (used for remote addresses).
+func formatAddr(ip net.IP, port uint16, resolveHost bool, res *resolver.Resolver) string {
+	var host string
+	switch {
+	case ip == nil:
+		host = "?"
+	case ip.IsUnspecified():
+		host = "*"
+	case resolveHost:
+		host = res.Hostname(ip)
+	default:
+		host = ip.String()
+	}
+
+	svc := resolver.ServiceName(port)
+	if port == 0 {
+		return host
+	}
+	return host + ":" + svc
 }
 
 func (m Model) renderFooter() string {
