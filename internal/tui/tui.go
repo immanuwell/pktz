@@ -177,8 +177,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.restorePinnedConn()
 		m.history = msg.history
 		m.updateRemoteColW()
-		if m.cursor >= len(m.procs) && len(m.procs) > 0 {
-			m.cursor = len(m.procs) - 1
+		if n := listLen(m); m.cursor >= n && n > 0 {
+			m.cursor = n - 1
 		}
 		m.syncGraphPID()
 
