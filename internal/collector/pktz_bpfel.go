@@ -14,14 +14,15 @@ import (
 )
 
 type pktzConnKey struct {
-	_     structs.HostLayout
-	Pid   uint32
-	Saddr uint32
-	Daddr uint32
-	Sport uint16
-	Dport uint16
-	Proto uint8
-	Pad   [3]uint8
+	_      structs.HostLayout
+	Pid    uint32
+	Saddr  [16]uint8
+	Daddr  [16]uint8
+	Sport  uint16
+	Dport  uint16
+	Proto  uint8
+	Family uint8
+	Pad    [2]uint8
 }
 
 type pktzConnStats struct {
@@ -90,6 +91,7 @@ type pktzProgramSpecs struct {
 	KprobeTcpCleanupRbuf *ebpf.ProgramSpec `ebpf:"kprobe_tcp_cleanup_rbuf"`
 	KprobeTcpSendmsg     *ebpf.ProgramSpec `ebpf:"kprobe_tcp_sendmsg"`
 	KprobeUdpSendmsg     *ebpf.ProgramSpec `ebpf:"kprobe_udp_sendmsg"`
+	KprobeUdpv6Sendmsg   *ebpf.ProgramSpec `ebpf:"kprobe_udpv6_sendmsg"`
 }
 
 // pktzMapSpecs contains maps before they are loaded into the kernel.
@@ -151,6 +153,7 @@ type pktzPrograms struct {
 	KprobeTcpCleanupRbuf *ebpf.Program `ebpf:"kprobe_tcp_cleanup_rbuf"`
 	KprobeTcpSendmsg     *ebpf.Program `ebpf:"kprobe_tcp_sendmsg"`
 	KprobeUdpSendmsg     *ebpf.Program `ebpf:"kprobe_udp_sendmsg"`
+	KprobeUdpv6Sendmsg   *ebpf.Program `ebpf:"kprobe_udpv6_sendmsg"`
 }
 
 func (p *pktzPrograms) Close() error {
@@ -159,6 +162,7 @@ func (p *pktzPrograms) Close() error {
 		p.KprobeTcpCleanupRbuf,
 		p.KprobeTcpSendmsg,
 		p.KprobeUdpSendmsg,
+		p.KprobeUdpv6Sendmsg,
 	)
 }
 

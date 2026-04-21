@@ -7,21 +7,25 @@
 #include <bpf/bpf_endian.h>
 
 #define AF_INET         2
+#define AF_INET6        10
 #define IPPROTO_TCP     6
 #define IPPROTO_UDP     17
 
 #define MAX_CONN_ENTRIES  10240
 #define MAX_PROC_ENTRIES  4096
 
-// 5-tuple + pid identifies a unique traffic flow per process
+// 5-tuple + pid identifies a unique traffic flow per process.
+// saddr/daddr are 16 bytes to hold both IPv4 (first 4 bytes, rest zero)
+// and IPv6 (full 16 bytes) addresses.
 struct conn_key {
     __u32 pid;
-    __u32 saddr;
-    __u32 daddr;
+    __u8  saddr[16];
+    __u8  daddr[16];
     __u16 sport;
     __u16 dport;
     __u8  proto;
-    __u8  pad[3];
+    __u8  family;
+    __u8  pad[2];
 };
 
 struct conn_stats {
@@ -64,24 +68,30 @@ record_traffic(struct sock *sk, __u64 bytes, bool is_tx, __u8 proto) {
         return;
 
     __u16 family = BPF_CORE_READ(sk, __sk_common.skc_family);
-    if (family != AF_INET)
+    if (family != AF_INET && family != AF_INET6)
         return;
 
-    __u32 saddr = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
-    __u32 daddr = BPF_CORE_READ(sk, __sk_common.skc_daddr);
-    __u16 sport = BPF_CORE_READ(sk, __sk_common.skc_num);
-    __u16 dport = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
+    struct conn_key key = {};
+    key.pid    = pid;
+    key.proto  = proto;
+    key.family = (__u8)family;
+    key.sport  = BPF_CORE_READ(sk, __sk_common.skc_num);
+    key.dport  = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
+
+    if (family == AF_INET) {
+        __u32 s4 = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
+        __u32 d4 = BPF_CORE_READ(sk, __sk_common.skc_daddr);
+        __builtin_memcpy(key.saddr, &s4, 4);
+        __builtin_memcpy(key.daddr, &d4, 4);
+    } else {
+        struct in6_addr s6, d6;
+        BPF_CORE_READ_INTO(&s6, sk, __sk_common.skc_v6_rcv_saddr);
+        BPF_CORE_READ_INTO(&d6, sk, __sk_common.skc_v6_daddr);
+        __builtin_memcpy(key.saddr, s6.in6_u.u6_addr8, 16);
+        __builtin_memcpy(key.daddr, d6.in6_u.u6_addr8, 16);
+    }
 
     // Update per-connection stats
-    struct conn_key key = {
-        .pid   = pid,
-        .saddr = saddr,
-        .daddr = daddr,
-        .sport = sport,
-        .dport = dport,
-        .proto = proto,
-    };
-
     struct conn_stats *cs = bpf_map_lookup_elem(&conn_stats_map, &key);
     if (!cs) {
         struct conn_stats zero = {};
@@ -130,7 +140,8 @@ int BPF_KPROBE(kprobe_tcp_sendmsg, struct sock *sk, struct msghdr *msg, size_t s
     return 0;
 }
 
-// tcp_cleanup_rbuf is called when userspace reads data from the TCP receive buffer
+// tcp_cleanup_rbuf is called when userspace reads data from the TCP receive buffer.
+// This handles both IPv4 and IPv6 TCP sockets.
 SEC("kprobe/tcp_cleanup_rbuf")
 int BPF_KPROBE(kprobe_tcp_cleanup_rbuf, struct sock *sk, int copied) {
     if (copied <= 0)
@@ -145,7 +156,14 @@ int BPF_KPROBE(kprobe_udp_sendmsg, struct sock *sk, struct msghdr *msg, size_t l
     return 0;
 }
 
-// skb_consume_udp is called when UDP data is consumed by userspace
+// udpv6_sendmsg handles IPv6 UDP transmit
+SEC("kprobe/udpv6_sendmsg")
+int BPF_KPROBE(kprobe_udpv6_sendmsg, struct sock *sk, struct msghdr *msg, size_t len) {
+    record_traffic(sk, len, true, IPPROTO_UDP);
+    return 0;
+}
+
+// skb_consume_udp is called when UDP data is consumed by userspace (IPv4 and IPv6)
 SEC("kprobe/skb_consume_udp")
 int BPF_KPROBE(kprobe_skb_consume_udp, struct sock *sk, struct sk_buff *skb, int len) {
     if (len <= 0)

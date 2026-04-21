@@ -82,6 +82,8 @@ func collectSockets() []rawSocket {
 	files := []struct{ path, proto string }{
 		{"/proc/net/tcp", "TCP"},
 		{"/proc/net/udp", "UDP"},
+		{"/proc/net/tcp6", "TCP"},
+		{"/proc/net/udp6", "UDP"},
 	}
 	var out []rawSocket
 	for _, f := range files {
@@ -108,11 +110,11 @@ func parseProcNetFile(path, proto string) ([]rawSocket, error) {
 		if len(fields) < 10 {
 			continue
 		}
-		localIP, localPort, err := parseHexAddrV4(fields[1])
+		localIP, localPort, err := parseHexAddr(fields[1])
 		if err != nil {
 			continue
 		}
-		remoteIP, remotePort, _ := parseHexAddrV4(fields[2])
+		remoteIP, remotePort, _ := parseHexAddr(fields[2])
 
 		stateVal, _ := strconv.ParseUint(fields[3], 16, 8)
 		inode, _ := strconv.ParseUint(fields[9], 10, 64)
@@ -128,6 +130,22 @@ func parseProcNetFile(path, proto string) ([]rawSocket, error) {
 		})
 	}
 	return out, sc.Err()
+}
+
+// parseHexAddr dispatches to the IPv4 or IPv6 parser based on address field length.
+func parseHexAddr(s string) (net.IP, uint16, error) {
+	idx := strings.IndexByte(s, ':')
+	if idx < 0 {
+		return nil, 0, fmt.Errorf("bad addr: %s", s)
+	}
+	switch idx {
+	case 8:
+		return parseHexAddrV4(s)
+	case 32:
+		return parseHexAddrV6(s)
+	default:
+		return nil, 0, fmt.Errorf("unexpected addr length %d: %s", idx, s)
+	}
 }
 
 // parseHexAddrV4 decodes an "AABBCCDD:PPPP" entry from /proc/net/tcp.
@@ -149,6 +167,34 @@ func parseHexAddrV4(s string) (net.IP, uint16, error) {
 	// Little-endian on-disk → reverse to get dotted-decimal order
 	ip := net.IP{b[3], b[2], b[1], b[0]}
 
+	port, err := strconv.ParseUint(portHex, 16, 16)
+	if err != nil {
+		return nil, 0, err
+	}
+	return ip, uint16(port), nil
+}
+
+// parseHexAddrV6 decodes a 32-char hex IPv6 address from /proc/net/tcp6.
+// The address is stored as 4 consecutive little-endian 32-bit words, so each
+// 4-byte group must be byte-reversed to recover network (big-endian) order.
+func parseHexAddrV6(s string) (net.IP, uint16, error) {
+	idx := strings.IndexByte(s, ':')
+	if idx < 0 {
+		return nil, 0, fmt.Errorf("bad addr: %s", s)
+	}
+	addrHex, portHex := s[:idx], s[idx+1:]
+
+	b, err := hex.DecodeString(addrHex)
+	if err != nil {
+		return nil, 0, err
+	}
+	ip := make(net.IP, 16)
+	for i := 0; i < 4; i++ {
+		ip[i*4+0] = b[i*4+3]
+		ip[i*4+1] = b[i*4+2]
+		ip[i*4+2] = b[i*4+1]
+		ip[i*4+3] = b[i*4+0]
+	}
 	port, err := strconv.ParseUint(portHex, 16, 16)
 	if err != nil {
 		return nil, 0, err

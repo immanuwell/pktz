@@ -5,7 +5,6 @@ package collector
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -strip llvm-strip-18 -cflags "-O2 -g -Wall -D__TARGET_ARCH_x86 -I../../bpf -I/usr/src/linux-headers-6.17.0-1017-oem/tools/bpf/resolve_btfids/libbpf/include" pktz ../../bpf/pktz.c
 
 import (
-	"encoding/binary"
 	"fmt"
 	"net"
 	"os"
@@ -57,12 +56,13 @@ type connSnapshot struct {
 
 // ebpfConnKey mirrors pktzConnKey but is comparable so it can be used as a map key.
 type ebpfConnKey struct {
-	pid   uint32
-	saddr uint32
-	daddr uint32
-	sport uint16
-	dport uint16
-	proto uint8
+	pid    uint32
+	saddr  [16]byte
+	daddr  [16]byte
+	sport  uint16
+	dport  uint16
+	proto  uint8
+	family uint8
 }
 
 // Collector manages the eBPF programs and aggregates traffic data.
@@ -123,6 +123,7 @@ func New() (*Collector, error) {
 		prog *ebpf.Program
 	}{
 		{"skb_consume_udp", objs.KprobeSkbConsumeUdp},
+		{"udpv6_sendmsg", objs.KprobeUdpv6Sendmsg},
 	}
 	for _, p := range optional {
 		if l, err := link.Kprobe(p.sym, p.prog, nil); err == nil {
@@ -264,6 +265,7 @@ func (c *Collector) poll() {
 		ek := ebpfConnKey{
 			pid: cKey.Pid, saddr: cKey.Saddr, daddr: cKey.Daddr,
 			sport: cKey.Sport, dport: cKey.Dport, proto: cKey.Proto,
+			family: cKey.Family,
 		}
 		prev := c.prevConn[ek]
 		dt := now.Sub(prev.at).Seconds()
@@ -279,8 +281,8 @@ func (c *Collector) poll() {
 		if cKey.Proto == 17 {
 			proto = "UDP"
 		}
-		ebpfSrc := intToIP(cKey.Saddr)
-		ebpfDst := intToIP(cKey.Daddr)
+		ebpfSrc := ebpfAddrToIP(cKey.Saddr, cKey.Family)
+		ebpfDst := ebpfAddrToIP(cKey.Daddr, cKey.Family)
 
 		// Overlay rates onto the matching /proc/net entry.
 		// If there is no match the connection is stale (closed but still in the
@@ -325,9 +327,16 @@ func (c *Collector) poll() {
 	c.mu.Unlock()
 }
 
-func intToIP(n uint32) net.IP {
-	ip := make(net.IP, 4)
-	binary.LittleEndian.PutUint32(ip, n)
+// ebpfAddrToIP converts a 16-byte address slot from an eBPF conn key to a net.IP.
+// IPv4 sockets store the address in the first 4 bytes (little-endian u32, matching
+// the kernel's skc_rcv_saddr layout on x86); IPv6 sockets use all 16 bytes in
+// network (big-endian) order directly from skc_v6_rcv_saddr.in6_u.u6_addr8.
+func ebpfAddrToIP(addr [16]byte, family uint8) net.IP {
+	if family == 2 { // AF_INET
+		return net.IP{addr[0], addr[1], addr[2], addr[3]}
+	}
+	ip := make(net.IP, 16)
+	copy(ip, addr[:])
 	return ip
 }
 
