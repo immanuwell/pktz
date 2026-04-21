@@ -5,6 +5,7 @@ package geoip
 import (
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -18,13 +19,31 @@ const (
 )
 
 // DataDir returns the directory where the MMDB files are stored.
-// Respects XDG_DATA_HOME; falls back to ~/.local/share/pktz.
+//
+// When running as root via sudo, SUDO_USER is set to the invoking user's name.
+// In that case we resolve their home directory so that databases downloaded
+// without sudo (./pktz --download-geoip-db) are automatically visible to
+// the root process (sudo ./pktz) without any extra steps.
 func DataDir() string {
-	if d := os.Getenv("XDG_DATA_HOME"); d != "" {
+	home := resolveHome()
+	if d := os.Getenv("XDG_DATA_HOME"); d != "" && os.Getuid() != 0 {
 		return filepath.Join(d, "pktz")
 	}
-	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".local", "share", "pktz")
+}
+
+// resolveHome returns the effective home directory: the sudo-invoking user's
+// home when running under sudo, otherwise the current user's home.
+func resolveHome() string {
+	if os.Getuid() == 0 {
+		if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
+			if u, err := user.Lookup(sudoUser); err == nil {
+				return u.HomeDir
+			}
+		}
+	}
+	home, _ := os.UserHomeDir()
+	return home
 }
 
 // DBPaths returns the expected on-disk paths for the two MMDB files.
