@@ -94,6 +94,7 @@ type Model struct {
 	pidColW      int  // dynamic: max PID digits in current list + 2
 	mouseEnabled bool // when false the terminal handles mouse natively (text select)
 	resolveNames bool // when true show hostname:service, when false show raw ip:port
+	compactIPv6  bool // when true shorten IPv6 to first:…:last
 	graphPID     uint32
 	graphName    string
 	history      []collector.HistoryEntry
@@ -116,6 +117,7 @@ func New(c *collector.Collector, res *resolver.Resolver) Model {
 		pidColW:      5,    // minimum; grows dynamically with observed PIDs
 		mouseEnabled: true,
 		resolveNames: true,
+		compactIPv6:  true,
 		filterInput:  fi,
 	}
 }
@@ -261,6 +263,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "r":
 		m.resolveNames = !m.resolveNames
+
+	case "v":
+		m.compactIPv6 = !m.compactIPv6
 
 	case "m":
 		if m.mouseEnabled {
@@ -475,8 +480,8 @@ func (m Model) renderConnTable() string {
 		rxS := colourRate(c.RxRate).Render(formatBytes(c.RxRate) + "/s")
 		txS := colourRate(c.TxRate).Render(formatBytes(c.TxRate) + "/s")
 		row := []string{
-			formatAddr(c.SrcAddr, c.SrcPort, false, m.res, m.resolveNames),
-			formatAddr(c.DstAddr, c.DstPort, true, m.res, m.resolveNames),
+			formatAddr(c.SrcAddr, c.SrcPort, false, m.res, m.resolveNames, m.compactIPv6),
+			formatAddr(c.DstAddr, c.DstPort, true, m.res, m.resolveNames, m.compactIPv6),
 			protoStyle.Render(c.Proto),
 			truncate(c.State, cols[3]-1),
 			rxS,
@@ -499,7 +504,8 @@ func (m Model) renderConnTable() string {
 // formatAddr formats an IP:port pair for display.
 // resolveHost=true triggers reverse-DNS on the IP (used for remote addresses).
 // resolve=false bypasses both hostname and service-name resolution (raw mode).
-func formatAddr(ip net.IP, port uint16, resolveHost bool, res *resolver.Resolver, resolve bool) string {
+// compactV6=true shortens IPv6 addresses to first:…:last notation.
+func formatAddr(ip net.IP, port uint16, resolveHost bool, res *resolver.Resolver, resolve bool, compactV6 bool) string {
 	var host string
 	switch {
 	case ip == nil:
@@ -508,8 +514,15 @@ func formatAddr(ip net.IP, port uint16, resolveHost bool, res *resolver.Resolver
 		host = "*"
 	case resolveHost && resolve:
 		host = res.Hostname(ip)
+		// If the resolver returned a raw IPv6 (no PTR record), compact it too.
+		if compactV6 && len(ip) == 16 && host == ip.String() {
+			host = shortIPv6(ip)
+		}
 	default:
 		host = ip.String()
+		if compactV6 && len(ip) == 16 {
+			host = shortIPv6(ip)
+		}
 	}
 
 	if port == 0 {
@@ -519,6 +532,14 @@ func formatAddr(ip net.IP, port uint16, resolveHost bool, res *resolver.Resolver
 		return host + ":" + resolver.ServiceName(port)
 	}
 	return fmt.Sprintf("%s:%d", host, port)
+}
+
+// shortIPv6 abbreviates a 16-byte IPv6 address to "first:…:last" where first
+// and last are the leading and trailing 16-bit groups in lowercase hex.
+func shortIPv6(ip net.IP) string {
+	first := fmt.Sprintf("%x", uint16(ip[0])<<8|uint16(ip[1]))
+	last := fmt.Sprintf("%x", uint16(ip[14])<<8|uint16(ip[15]))
+	return first + ":…:" + last
 }
 
 func (m Model) renderFooter() string {
@@ -540,10 +561,14 @@ func (m Model) renderFooter() string {
 	if !m.resolveNames {
 		resolveHint = "r:resolve names"
 	}
+	ipv6Hint := "v:full IPv6"
+	if !m.compactIPv6 {
+		ipv6Hint = "v:compact IPv6"
+	}
 	if m.activeView == viewProcessList {
 		keys = helpStyle.Render(fmt.Sprintf("↑↓:nav  enter:detail  click:sort  /:filter  s:sort  %s  q:quit", mouseHint))
 	} else {
-		keys = helpStyle.Render(fmt.Sprintf("↑↓:nav  esc:back  %s  %s  q:quit", resolveHint, mouseHint))
+		keys = helpStyle.Render(fmt.Sprintf("↑↓:nav  esc:back  %s  %s  %s  q:quit", resolveHint, ipv6Hint, mouseHint))
 	}
 
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(keys)
