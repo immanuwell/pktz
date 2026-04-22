@@ -20,14 +20,15 @@ import (
 
 // ProcessInfo holds aggregated traffic stats for one process.
 type ProcessInfo struct {
-	PID       uint32
-	PPID      uint32 // parent PID; 0 if unknown
-	Comm      string
-	RxRate    float64 // bytes/sec since last poll
-	TxRate    float64
-	RxTotal   uint64
-	TxTotal   uint64
-	ConnCount int
+	PID           uint32
+	PPID          uint32 // parent PID; 0 if unknown
+	Comm          string
+	ContainerName string // human-readable container name or short ID; "" for host processes
+	RxRate        float64 // bytes/sec since last poll
+	TxRate        float64
+	RxTotal       uint64
+	TxTotal       uint64
+	ConnCount     int
 }
 
 // ConnInfo holds per-connection traffic stats.
@@ -77,8 +78,9 @@ type Collector struct {
 	connsByPID  map[uint32][]ConnInfo
 	history     map[uint32][]HistoryEntry
 
-	prevProc map[uint32]procSnapshot
-	prevConn map[ebpfConnKey]connSnapshot
+	prevProc       map[uint32]procSnapshot
+	prevConn       map[ebpfConnKey]connSnapshot
+	containerNames map[string]string // container ID → resolved name; populated lazily
 }
 
 // New loads the eBPF programs and attaches kprobes.
@@ -93,12 +95,13 @@ func New() (*Collector, error) {
 	}
 
 	c := &Collector{
-		objs:        objs,
-		procs:       make(map[uint32]*ProcessInfo),
-		connsByPID:  make(map[uint32][]ConnInfo),
-		history:     make(map[uint32][]HistoryEntry),
-		prevProc:    make(map[uint32]procSnapshot),
-		prevConn:    make(map[ebpfConnKey]connSnapshot),
+		objs:           objs,
+		procs:          make(map[uint32]*ProcessInfo),
+		connsByPID:     make(map[uint32][]ConnInfo),
+		history:        make(map[uint32][]HistoryEntry),
+		prevProc:       make(map[uint32]procSnapshot),
+		prevConn:       make(map[ebpfConnKey]connSnapshot),
+		containerNames: make(map[string]string),
 	}
 
 	// required probes — fatal if missing
@@ -199,10 +202,11 @@ func (c *Collector) poll() {
 	newProcs := make(map[uint32]*ProcessInfo, len(pidConns))
 	for pid, conns := range pidConns {
 		newProcs[pid] = &ProcessInfo{
-			PID:       pid,
-			PPID:      ppidFromProc(pid),
-			Comm:      commFromProc(pid),
-			ConnCount: len(conns),
+			PID:           pid,
+			PPID:          ppidFromProc(pid),
+			Comm:          commFromProc(pid),
+			ContainerName: c.resolveContainerName(readContainerID(pid)),
+			ConnCount:     len(conns),
 		}
 	}
 
@@ -230,7 +234,7 @@ func (c *Collector) poll() {
 			if _, err := os.Stat(fmt.Sprintf("/proc/%d", pid)); err != nil {
 				continue
 			}
-			p = &ProcessInfo{PID: pid, PPID: ppidFromProc(pid), Comm: commFromProc(pid)}
+			p = &ProcessInfo{PID: pid, PPID: ppidFromProc(pid), Comm: commFromProc(pid), ContainerName: c.resolveContainerName(readContainerID(pid))}
 			if comm := nullTermString(pVal.Comm[:]); comm != "" {
 				p.Comm = comm
 			}
@@ -360,6 +364,24 @@ func nullTermString(b []int8) string {
 		bs[i] = byte(v)
 	}
 	return strings.TrimSpace(string(bs))
+}
+
+// resolveContainerName maps a 64-char container ID to a human-readable name.
+// It tries the Docker socket on first sight; falls back to the short 12-char ID.
+// Results are cached for the lifetime of the Collector.
+func (c *Collector) resolveContainerName(containerID string) string {
+	if containerID == "" {
+		return ""
+	}
+	if name, ok := c.containerNames[containerID]; ok {
+		return name
+	}
+	name := lookupDockerName(containerID)
+	if name == "" {
+		name = containerID[:12]
+	}
+	c.containerNames[containerID] = name
+	return name
 }
 
 func commFromProc(pid uint32) string {

@@ -60,6 +60,8 @@ var (
 
 	graphRXStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#34D399"))
 	graphTXStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FCD34D"))
+
+	containerBadgeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#38BDF8"))
 )
 
 // colourRate picks a style based on magnitude (bytes/sec).

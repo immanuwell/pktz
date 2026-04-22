@@ -585,18 +585,31 @@ func (m Model) renderProcTable() string {
 			connCount = row.aggConns
 		}
 
-		// Comm column: decorate with group/child indicator.
+		// Comm column: optional container badge + group/child indicator.
+		var badge string
+		if p.ContainerName != "" {
+			name := p.ContainerName
+			if len(name) > 12 {
+				name = name[:11] + "…"
+			}
+			badge = containerBadgeStyle.Render("["+name+"]") + " "
+		}
+		badgeW := lipgloss.Width(badge)
+		remaining := cols[1] - badgeW
+		if remaining < 4 {
+			remaining = 4
+		}
 		var comm string
 		switch {
 		case row.isGroup && !row.isExpanded:
 			suffix := fmt.Sprintf(" +%d", row.childCount)
-			comm = "▸ " + truncate(p.Comm, cols[1]-2-len(suffix)) + suffix
+			comm = badge + "▸ " + truncate(p.Comm, remaining-2-len(suffix)) + suffix
 		case row.isGroup && row.isExpanded:
-			comm = "▾ " + truncate(p.Comm, cols[1]-3)
+			comm = badge + "▾ " + truncate(p.Comm, remaining-3)
 		case row.isChild:
-			comm = "  └ " + truncate(p.Comm, cols[1]-5)
+			comm = badge + "  └ " + truncate(p.Comm, remaining-5)
 		default:
-			comm = truncate(p.Comm, cols[1]-1)
+			comm = badge + truncate(p.Comm, remaining-1)
 		}
 
 		rxS := colourRate(rxRate).Render(formatBytes(rxRate) + "/s")
@@ -1023,7 +1036,8 @@ func applyFilter(procs []collector.ProcessInfo, q string) []collector.ProcessInf
 	q = strings.ToLower(q)
 	out := procs[:0:0]
 	for _, p := range procs {
-		if strings.Contains(strings.ToLower(p.Comm), q) {
+		if strings.Contains(strings.ToLower(p.Comm), q) ||
+			strings.Contains(strings.ToLower(p.ContainerName), q) {
 			out = append(out, p)
 		}
 	}
