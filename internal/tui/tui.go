@@ -70,6 +70,22 @@ var (
 	procListSortKeys = []sortKey{sortByPID, sortByName, sortByRx, sortByTx, sortByTotal, sortByTotal, sortByConn}
 )
 
+// procRow is one visible entry in the process list — standalone, group header,
+// or an expanded child. The slice is rebuilt whenever m.procs or expansion state changes.
+type procRow struct {
+	proc       collector.ProcessInfo
+	isGroup    bool // group header with children
+	isExpanded bool // valid when isGroup=true
+	childCount int  // valid when isGroup=true
+	isChild    bool // indented child of a group header
+	// aggregated stats used when the group is collapsed (header + all children)
+	aggRxRate  float64
+	aggTxRate  float64
+	aggRxTotal uint64
+	aggTxTotal uint64
+	aggConns   int
+}
+
 // tickMsg fires on every refresh interval.
 type tickMsg time.Time
 
@@ -128,6 +144,8 @@ type Model struct {
 	filterInput  textinput.Model
 	filtering    bool
 	appFilter    string // permanent filter set by --app flag; empty = disabled
+	procRows     []procRow
+	groupExpanded map[uint32]bool // key = parent PID; true = expanded
 	err          error
 }
 
@@ -141,20 +159,21 @@ func New(c *collector.Collector, res *resolver.Resolver, geo *geoip.DB, anon *de
 	fi.CharLimit = 32
 
 	m := Model{
-		coll:         c,
-		res:          res,
-		sortBy:       sortByName,
-		sortAsc:      true,
-		pidColW:      5,
-		mouseEnabled: true,
-		resolveNames: true,
-		compactIPv6:  true,
-		remoteColW:   30,
-		geo:          geo,
-		showGeo:      geo != nil,
-		anon:         anon,
-		filterInput:  fi,
-		appFilter:    appFilter,
+		coll:          c,
+		res:           res,
+		sortBy:        sortByName,
+		sortAsc:       true,
+		pidColW:       5,
+		mouseEnabled:  true,
+		resolveNames:  true,
+		compactIPv6:   true,
+		remoteColW:    30,
+		geo:           geo,
+		showGeo:       geo != nil,
+		anon:          anon,
+		filterInput:   fi,
+		appFilter:     appFilter,
+		groupExpanded: make(map[uint32]bool),
 	}
 
 	if initialPID != 0 {
@@ -195,6 +214,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case statsMsg:
 		m.procs = applyFilter(applyAppFilter(msg.procs, m.appFilter), m.filterInput.Value())
 		sortProcs(m.procs, m.sortBy, m.sortAsc)
+		m.rebuildProcRows()
 		m.pidColW = calcPIDColWidth(msg.procs) // use full unfiltered list for width
 		m.conns = msg.conns
 		sortConns(m.conns)
@@ -283,9 +303,22 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.pinCursor()
 		}
 
+	case " ":
+		if m.activeView == viewProcessList && m.cursor < len(m.procRows) {
+			row := m.procRows[m.cursor]
+			if row.isGroup {
+				m.groupExpanded[row.proc.PID] = !m.groupExpanded[row.proc.PID]
+				m.rebuildProcRows()
+				if m.cursor >= len(m.procRows) {
+					m.cursor = len(m.procRows) - 1
+				}
+				m.syncGraphPID()
+			}
+		}
+
 	case "enter":
-		if m.activeView == viewProcessList && len(m.procs) > 0 {
-			p := m.procs[m.cursor]
+		if m.activeView == viewProcessList && len(m.procRows) > 0 {
+			p := m.procRows[m.cursor].proc
 			m.detailPID = p.PID
 			m.detailComm = p.Comm
 			m.activeView = viewConnDetail
@@ -357,15 +390,15 @@ func (m *Model) syncGraphPID() {
 		m.graphName = m.detailComm
 		return
 	}
-	if len(m.procs) == 0 {
+	if len(m.procRows) == 0 {
 		return
 	}
 	cur := m.cursor
-	if cur >= len(m.procs) {
-		cur = len(m.procs) - 1
+	if cur >= len(m.procRows) {
+		cur = len(m.procRows) - 1
 	}
-	m.graphPID = m.procs[cur].PID
-	m.graphName = m.procs[cur].Comm
+	m.graphPID = m.procRows[cur].proc.PID
+	m.graphName = m.procRows[cur].proc.Comm
 }
 
 // pinCursor records the identity of the connection currently under the cursor
@@ -429,7 +462,7 @@ func listLen(m Model) int {
 	if m.activeView == viewConnDetail {
 		return len(m.conns)
 	}
-	return len(m.procs)
+	return len(m.procRows)
 }
 
 func fetchStats(c *collector.Collector, pid uint32, v view, graphPID uint32, anon *demo.Anonymizer) tea.Cmd {
@@ -525,7 +558,7 @@ func (m Model) renderProcTable() string {
 	sb.WriteString(dimStyle.Render(strings.Repeat("─", m.width)))
 	sb.WriteString("\n")
 
-	if len(m.procs) == 0 {
+	if len(m.procRows) == 0 {
 		sb.WriteString(dimStyle.Render("  waiting for network traffic…"))
 		sb.WriteString("\n")
 		return sb.String()
@@ -537,19 +570,45 @@ func (m Model) renderProcTable() string {
 		tableRows = 1
 	}
 
-	start, end := visibleRange(m.cursor, len(m.procs), tableRows)
+	start, end := visibleRange(m.cursor, len(m.procRows), tableRows)
 	for i := start; i < end; i++ {
-		p := m.procs[i]
-		rxS := colourRate(p.RxRate).Render(formatBytes(p.RxRate) + "/s")
-		txS := colourRate(p.TxRate).Render(formatBytes(p.TxRate) + "/s")
-		row := []string{
+		row := m.procRows[i]
+		p := row.proc
+
+		// Stats: aggregated for a collapsed group, own stats otherwise.
+		rxRate, txRate := p.RxRate, p.TxRate
+		rxTotal, txTotal := p.RxTotal, p.TxTotal
+		connCount := p.ConnCount
+		if row.isGroup && !row.isExpanded {
+			rxRate, txRate = row.aggRxRate, row.aggTxRate
+			rxTotal, txTotal = row.aggRxTotal, row.aggTxTotal
+			connCount = row.aggConns
+		}
+
+		// Comm column: decorate with group/child indicator.
+		var comm string
+		switch {
+		case row.isGroup && !row.isExpanded:
+			suffix := fmt.Sprintf(" +%d", row.childCount)
+			comm = "▸ " + truncate(p.Comm, cols[1]-2-len(suffix)) + suffix
+		case row.isGroup && row.isExpanded:
+			comm = "▾ " + truncate(p.Comm, cols[1]-3)
+		case row.isChild:
+			comm = "  └ " + truncate(p.Comm, cols[1]-5)
+		default:
+			comm = truncate(p.Comm, cols[1]-1)
+		}
+
+		rxS := colourRate(rxRate).Render(formatBytes(rxRate) + "/s")
+		txS := colourRate(txRate).Render(formatBytes(txRate) + "/s")
+		cells := []string{
 			fmt.Sprintf("%d", p.PID),
-			truncate(p.Comm, cols[1]-1),
+			comm,
 			rxS,
 			txS,
-			formatBytes(float64(p.RxTotal)),
-			formatBytes(float64(p.TxTotal)),
-			fmt.Sprintf("%d", p.ConnCount),
+			formatBytes(float64(rxTotal)),
+			formatBytes(float64(txTotal)),
+			fmt.Sprintf("%d", connCount),
 		}
 		style := normalStyle
 		prefix := "  "
@@ -557,7 +616,7 @@ func (m Model) renderProcTable() string {
 			style = selectedStyle
 			prefix = "▶ "
 		}
-		sb.WriteString(style.Render(prefix + renderCells(row, cols, style)))
+		sb.WriteString(style.Render(prefix + renderCells(cells, cols, style)))
 		sb.WriteString("\n")
 	}
 	return sb.String()
@@ -720,7 +779,14 @@ func (m Model) renderFooter() string {
 		ipv6Hint = "v:compact IPv6"
 	}
 	if m.activeView == viewProcessList {
-		keys = helpStyle.Render(fmt.Sprintf("↑↓:nav  enter:detail  click:sort  /:filter  s:sort  %s  q:quit", mouseHint))
+		groupHint := ""
+		for _, row := range m.procRows {
+			if row.isGroup {
+				groupHint = "  space:expand"
+				break
+			}
+		}
+		keys = helpStyle.Render(fmt.Sprintf("↑↓:nav  enter:detail  click:sort  /:filter  s:sort%s  %s  q:quit", groupHint, mouseHint))
 	} else {
 		geoHint := ""
 		if m.geo != nil {
@@ -834,6 +900,105 @@ func visibleRange(cursor, total, rows int) (int, int) {
 		}
 	}
 	return start, end
+}
+
+// rebuildProcRows recomputes m.procRows from m.procs + m.groupExpanded.
+// Must be called whenever either changes.
+func (m *Model) rebuildProcRows() {
+	m.procRows = buildProcRows(m.procs, m.groupExpanded)
+}
+
+// minGroupChildren is the minimum number of children a parent needs to be
+// shown as a collapsible group rather than individual rows.
+const minGroupChildren = 2
+
+func buildProcRows(procs []collector.ProcessInfo, expanded map[uint32]bool) []procRow {
+	// Build a set of PIDs present in the current process list.
+	inList := make(map[uint32]bool, len(procs))
+	for _, p := range procs {
+		inList[p.PID] = true
+	}
+
+	// Map parent PID → children, but only when the parent is also in the list.
+	childrenOf := make(map[uint32][]collector.ProcessInfo)
+	for _, p := range procs {
+		if inList[p.PPID] {
+			childrenOf[p.PPID] = append(childrenOf[p.PPID], p)
+		}
+	}
+
+	// A process is a group parent only when it has enough children.
+	isGroupParent := make(map[uint32]bool)
+	for ppid, kids := range childrenOf {
+		if len(kids) >= minGroupChildren {
+			isGroupParent[ppid] = true
+		}
+	}
+
+	// Mark which processes are grouped under a parent.
+	isGroupedChild := make(map[uint32]bool)
+	for ppid := range isGroupParent {
+		for _, kid := range childrenOf[ppid] {
+			isGroupedChild[kid.PID] = true
+		}
+	}
+
+	rows := make([]procRow, 0, len(procs))
+	for _, p := range procs {
+		if isGroupedChild[p.PID] {
+			continue // rendered under its parent
+		}
+		if isGroupParent[p.PID] {
+			kids := childrenOf[p.PID]
+			exp := expanded[p.PID]
+			agg := aggregateGroup(p, kids)
+			rows = append(rows, procRow{
+				proc:       p,
+				isGroup:    true,
+				isExpanded: exp,
+				childCount: len(kids),
+				aggRxRate:  agg.rxRate,
+				aggTxRate:  agg.txRate,
+				aggRxTotal: agg.rxTotal,
+				aggTxTotal: agg.txTotal,
+				aggConns:   agg.conns,
+			})
+			if exp {
+				for _, kid := range kids {
+					rows = append(rows, procRow{proc: kid, isChild: true})
+				}
+			}
+		} else {
+			rows = append(rows, procRow{proc: p})
+		}
+	}
+	return rows
+}
+
+type groupAggregate struct {
+	rxRate  float64
+	txRate  float64
+	rxTotal uint64
+	txTotal uint64
+	conns   int
+}
+
+func aggregateGroup(parent collector.ProcessInfo, children []collector.ProcessInfo) groupAggregate {
+	agg := groupAggregate{
+		rxRate:  parent.RxRate,
+		txRate:  parent.TxRate,
+		rxTotal: parent.RxTotal,
+		txTotal: parent.TxTotal,
+		conns:   parent.ConnCount,
+	}
+	for _, kid := range children {
+		agg.rxRate += kid.RxRate
+		agg.txRate += kid.TxRate
+		agg.rxTotal += kid.RxTotal
+		agg.txTotal += kid.TxTotal
+		agg.conns += kid.ConnCount
+	}
+	return agg
 }
 
 // applyAppFilter is the permanent filter applied by the --app flag.

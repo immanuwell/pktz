@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ import (
 // ProcessInfo holds aggregated traffic stats for one process.
 type ProcessInfo struct {
 	PID       uint32
+	PPID      uint32 // parent PID; 0 if unknown
 	Comm      string
 	RxRate    float64 // bytes/sec since last poll
 	TxRate    float64
@@ -198,6 +200,7 @@ func (c *Collector) poll() {
 	for pid, conns := range pidConns {
 		newProcs[pid] = &ProcessInfo{
 			PID:       pid,
+			PPID:      ppidFromProc(pid),
 			Comm:      commFromProc(pid),
 			ConnCount: len(conns),
 		}
@@ -227,7 +230,7 @@ func (c *Collector) poll() {
 			if _, err := os.Stat(fmt.Sprintf("/proc/%d", pid)); err != nil {
 				continue
 			}
-			p = &ProcessInfo{PID: pid, Comm: commFromProc(pid)}
+			p = &ProcessInfo{PID: pid, PPID: ppidFromProc(pid), Comm: commFromProc(pid)}
 			if comm := nullTermString(pVal.Comm[:]); comm != "" {
 				p.Comm = comm
 			}
@@ -365,4 +368,25 @@ func commFromProc(pid uint32) string {
 		return fmt.Sprintf("pid%d", pid)
 	}
 	return strings.TrimSpace(string(data))
+}
+
+// ppidFromProc reads the parent PID from /proc/<pid>/stat.
+// Format: "pid (comm) state ppid ..." — we skip past the last ')' to handle
+// comm names that contain spaces or parentheses.
+func ppidFromProc(pid uint32) uint32 {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0
+	}
+	s := string(data)
+	idx := strings.LastIndex(s, ")")
+	if idx < 0 || idx+2 >= len(s) {
+		return 0
+	}
+	fields := strings.Fields(s[idx+1:])
+	if len(fields) < 2 {
+		return 0
+	}
+	n, _ := strconv.ParseUint(fields[1], 10, 32)
+	return uint32(n)
 }
