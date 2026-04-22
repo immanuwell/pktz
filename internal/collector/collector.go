@@ -28,6 +28,7 @@ type ProcessInfo struct {
 	TxRate        float64
 	RxTotal       uint64
 	TxTotal       uint64
+	RetransTotal  uint64  // TCP bytes retransmitted since pktz started
 	RxPPS         float64 // packets/sec since last poll
 	TxPPS         float64
 	ConnCount     int
@@ -141,6 +142,7 @@ func New() (*Collector, error) {
 	}{
 		{"skb_consume_udp", objs.KprobeSkbConsumeUdp},
 		{"udpv6_sendmsg", objs.KprobeUdpv6Sendmsg},
+		{"tcp_retransmit_skb", objs.KprobeTcpRetransmitSkb},
 	}
 	for _, p := range optional {
 		if l, err := link.Kprobe(p.sym, p.prog, nil); err == nil {
@@ -269,6 +271,7 @@ func (c *Collector) poll() {
 		p.TxRate = txRate
 		p.RxTotal = pVal.RxBytes
 		p.TxTotal = pVal.TxBytes
+		p.RetransTotal = pVal.RetransBytes
 		p.RxPPS = rxPPS
 		p.TxPPS = txPPS
 	}

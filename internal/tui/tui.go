@@ -38,6 +38,7 @@ const (
 	sortByPID
 	sortByConn
 	sortByPPS
+	sortByRetrans
 	sortKeyCount
 )
 
@@ -57,6 +58,8 @@ func (s sortKey) label() string {
 		return "Conn"
 	case sortByPPS:
 		return "PPS"
+	case sortByRetrans:
+		return "Retrans"
 	}
 	return ""
 }
@@ -69,9 +72,9 @@ const headerRowY = 2
 // procListCols, procListHeaders, and procListSortKeys define the process table layout.
 // Each index corresponds to one column; sortKey is what clicking that header activates.
 var (
-	procListCols     = []int{7, 22, 11, 11, 11, 11, 5, 8}
-	procListHeaders  = []string{"PID", "PROCESS", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "CONN", "PPS"}
-	procListSortKeys = []sortKey{sortByPID, sortByName, sortByRx, sortByTx, sortByTotal, sortByTotal, sortByConn, sortByPPS}
+	procListCols     = []int{7, 22, 11, 11, 11, 11, 5, 8, 9}
+	procListHeaders  = []string{"PID", "PROCESS", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "CONN", "PPS", "RETRANS"}
+	procListSortKeys = []sortKey{sortByPID, sortByName, sortByRx, sortByTx, sortByTotal, sortByTotal, sortByConn, sortByPPS, sortByRetrans}
 
 	containerListCols    = []int{24, 6, 11, 11, 11, 11, 5}
 	containerListHeaders = []string{"CONTAINER", "PROCS", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "CONN"}
@@ -98,12 +101,13 @@ type procRow struct {
 	childCount int  // valid when isGroup=true
 	isChild    bool // indented child of a group header
 	// aggregated stats used when the group is collapsed (header + all children)
-	aggRxRate  float64
-	aggTxRate  float64
-	aggRxTotal uint64
-	aggTxTotal uint64
-	aggConns   int
-	aggPPS     float64
+	aggRxRate      float64
+	aggTxRate      float64
+	aggRxTotal     uint64
+	aggTxTotal     uint64
+	aggRetransTot  uint64
+	aggConns       int
+	aggPPS         float64
 }
 
 // tickMsg fires on every refresh interval.
@@ -684,11 +688,13 @@ func (m Model) renderProcTable() string {
 		// Stats: aggregated for a collapsed group, own stats otherwise.
 		rxRate, txRate := p.RxRate, p.TxRate
 		rxTotal, txTotal := p.RxTotal, p.TxTotal
+		retransTotal := p.RetransTotal
 		connCount := p.ConnCount
 		pps := p.RxPPS + p.TxPPS
 		if row.isGroup && !row.isExpanded {
 			rxRate, txRate = row.aggRxRate, row.aggTxRate
 			rxTotal, txTotal = row.aggRxTotal, row.aggTxTotal
+			retransTotal = row.aggRetransTot
 			connCount = row.aggConns
 			pps = row.aggPPS
 		}
@@ -722,6 +728,12 @@ func (m Model) renderProcTable() string {
 
 		rxS := colourRate(rxRate).Render(formatBytes(rxRate) + "/s")
 		txS := colourRate(txRate).Render(formatBytes(txRate) + "/s")
+		var retransCell string
+		if retransTotal > 0 {
+			retransCell = errorStyle.Render(formatBytes(float64(retransTotal)))
+		} else {
+			retransCell = dimStyle.Render("—")
+		}
 		cells := []string{
 			fmt.Sprintf("%d", p.PID),
 			comm,
@@ -731,6 +743,7 @@ func (m Model) renderProcTable() string {
 			formatBytes(float64(txTotal)),
 			fmt.Sprintf("%d", connCount),
 			dimStyle.Render(formatPPS(pps)),
+			retransCell,
 		}
 		style := normalStyle
 		prefix := "  "
@@ -1086,16 +1099,17 @@ func buildProcRows(procs []collector.ProcessInfo, expanded map[uint32]bool) []pr
 			exp := expanded[p.PID]
 			agg := aggregateGroup(p, kids)
 			rows = append(rows, procRow{
-				proc:       p,
-				isGroup:    true,
-				isExpanded: exp,
-				childCount: len(kids),
-				aggRxRate:  agg.rxRate,
-				aggTxRate:  agg.txRate,
-				aggRxTotal: agg.rxTotal,
-				aggTxTotal: agg.txTotal,
-				aggConns:   agg.conns,
-				aggPPS:     agg.pps,
+				proc:          p,
+				isGroup:       true,
+				isExpanded:    exp,
+				childCount:    len(kids),
+				aggRxRate:     agg.rxRate,
+				aggTxRate:     agg.txRate,
+				aggRxTotal:    agg.rxTotal,
+				aggTxTotal:    agg.txTotal,
+				aggRetransTot: agg.retransTotal,
+				aggConns:      agg.conns,
+				aggPPS:        agg.pps,
 			})
 			if exp {
 				for _, kid := range kids {
@@ -1110,28 +1124,31 @@ func buildProcRows(procs []collector.ProcessInfo, expanded map[uint32]bool) []pr
 }
 
 type groupAggregate struct {
-	rxRate  float64
-	txRate  float64
-	rxTotal uint64
-	txTotal uint64
-	conns   int
-	pps     float64
+	rxRate       float64
+	txRate       float64
+	rxTotal      uint64
+	txTotal      uint64
+	retransTotal uint64
+	conns        int
+	pps          float64
 }
 
 func aggregateGroup(parent collector.ProcessInfo, children []collector.ProcessInfo) groupAggregate {
 	agg := groupAggregate{
-		rxRate:  parent.RxRate,
-		txRate:  parent.TxRate,
-		rxTotal: parent.RxTotal,
-		txTotal: parent.TxTotal,
-		conns:   parent.ConnCount,
-		pps:     parent.RxPPS + parent.TxPPS,
+		rxRate:       parent.RxRate,
+		txRate:       parent.TxRate,
+		rxTotal:      parent.RxTotal,
+		txTotal:      parent.TxTotal,
+		retransTotal: parent.RetransTotal,
+		conns:        parent.ConnCount,
+		pps:          parent.RxPPS + parent.TxPPS,
 	}
 	for _, kid := range children {
 		agg.rxRate += kid.RxRate
 		agg.txRate += kid.TxRate
 		agg.rxTotal += kid.RxTotal
 		agg.txTotal += kid.TxTotal
+		agg.retransTotal += kid.RetransTotal
 		agg.conns += kid.ConnCount
 		agg.pps += kid.RxPPS + kid.TxPPS
 	}
@@ -1273,6 +1290,8 @@ func sortProcs(procs []collector.ProcessInfo, by sortKey, asc bool) {
 			less = a.ConnCount < b.ConnCount
 		case sortByPPS:
 			less = (a.RxPPS + a.TxPPS) < (b.RxPPS + b.TxPPS)
+		case sortByRetrans:
+			less = a.RetransTotal < b.RetransTotal
 		default: // sortByRx
 			less = a.RxRate < b.RxRate
 		}

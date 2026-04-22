@@ -36,13 +36,14 @@ type pktzConnStats struct {
 }
 
 type pktzProcStats struct {
-	_         structs.HostLayout
-	TxBytes   uint64
-	RxBytes   uint64
-	TxPackets uint64
-	RxPackets uint64
-	LastNs    uint64
-	Comm      [16]int8
+	_            structs.HostLayout
+	TxBytes      uint64
+	RxBytes      uint64
+	TxPackets    uint64
+	RxPackets    uint64
+	LastNs       uint64
+	RetransBytes uint64
+	Comm         [16]int8
 }
 
 // loadPktz returns the embedded CollectionSpec for pktz.
@@ -87,11 +88,12 @@ type pktzSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type pktzProgramSpecs struct {
-	KprobeSkbConsumeUdp  *ebpf.ProgramSpec `ebpf:"kprobe_skb_consume_udp"`
-	KprobeTcpCleanupRbuf *ebpf.ProgramSpec `ebpf:"kprobe_tcp_cleanup_rbuf"`
-	KprobeTcpSendmsg     *ebpf.ProgramSpec `ebpf:"kprobe_tcp_sendmsg"`
-	KprobeUdpSendmsg     *ebpf.ProgramSpec `ebpf:"kprobe_udp_sendmsg"`
-	KprobeUdpv6Sendmsg   *ebpf.ProgramSpec `ebpf:"kprobe_udpv6_sendmsg"`
+	KprobeSkbConsumeUdp    *ebpf.ProgramSpec `ebpf:"kprobe_skb_consume_udp"`
+	KprobeTcpCleanupRbuf   *ebpf.ProgramSpec `ebpf:"kprobe_tcp_cleanup_rbuf"`
+	KprobeTcpRetransmitSkb *ebpf.ProgramSpec `ebpf:"kprobe_tcp_retransmit_skb"`
+	KprobeTcpSendmsg       *ebpf.ProgramSpec `ebpf:"kprobe_tcp_sendmsg"`
+	KprobeUdpSendmsg       *ebpf.ProgramSpec `ebpf:"kprobe_udp_sendmsg"`
+	KprobeUdpv6Sendmsg     *ebpf.ProgramSpec `ebpf:"kprobe_udpv6_sendmsg"`
 }
 
 // pktzMapSpecs contains maps before they are loaded into the kernel.
@@ -100,6 +102,7 @@ type pktzProgramSpecs struct {
 type pktzMapSpecs struct {
 	ConnStatsMap *ebpf.MapSpec `ebpf:"conn_stats_map"`
 	ProcStatsMap *ebpf.MapSpec `ebpf:"proc_stats_map"`
+	SockPidMap   *ebpf.MapSpec `ebpf:"sock_pid_map"`
 }
 
 // pktzVariableSpecs contains global variables before they are loaded into the kernel.
@@ -130,12 +133,14 @@ func (o *pktzObjects) Close() error {
 type pktzMaps struct {
 	ConnStatsMap *ebpf.Map `ebpf:"conn_stats_map"`
 	ProcStatsMap *ebpf.Map `ebpf:"proc_stats_map"`
+	SockPidMap   *ebpf.Map `ebpf:"sock_pid_map"`
 }
 
 func (m *pktzMaps) Close() error {
 	return _PktzClose(
 		m.ConnStatsMap,
 		m.ProcStatsMap,
+		m.SockPidMap,
 	)
 }
 
@@ -149,17 +154,19 @@ type pktzVariables struct {
 //
 // It can be passed to loadPktzObjects or ebpf.CollectionSpec.LoadAndAssign.
 type pktzPrograms struct {
-	KprobeSkbConsumeUdp  *ebpf.Program `ebpf:"kprobe_skb_consume_udp"`
-	KprobeTcpCleanupRbuf *ebpf.Program `ebpf:"kprobe_tcp_cleanup_rbuf"`
-	KprobeTcpSendmsg     *ebpf.Program `ebpf:"kprobe_tcp_sendmsg"`
-	KprobeUdpSendmsg     *ebpf.Program `ebpf:"kprobe_udp_sendmsg"`
-	KprobeUdpv6Sendmsg   *ebpf.Program `ebpf:"kprobe_udpv6_sendmsg"`
+	KprobeSkbConsumeUdp    *ebpf.Program `ebpf:"kprobe_skb_consume_udp"`
+	KprobeTcpCleanupRbuf   *ebpf.Program `ebpf:"kprobe_tcp_cleanup_rbuf"`
+	KprobeTcpRetransmitSkb *ebpf.Program `ebpf:"kprobe_tcp_retransmit_skb"`
+	KprobeTcpSendmsg       *ebpf.Program `ebpf:"kprobe_tcp_sendmsg"`
+	KprobeUdpSendmsg       *ebpf.Program `ebpf:"kprobe_udp_sendmsg"`
+	KprobeUdpv6Sendmsg     *ebpf.Program `ebpf:"kprobe_udpv6_sendmsg"`
 }
 
 func (p *pktzPrograms) Close() error {
 	return _PktzClose(
 		p.KprobeSkbConsumeUdp,
 		p.KprobeTcpCleanupRbuf,
+		p.KprobeTcpRetransmitSkb,
 		p.KprobeTcpSendmsg,
 		p.KprobeUdpSendmsg,
 		p.KprobeUdpv6Sendmsg,

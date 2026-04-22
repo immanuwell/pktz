@@ -13,6 +13,7 @@
 
 #define MAX_CONN_ENTRIES  10240
 #define MAX_PROC_ENTRIES  4096
+#define MAX_SOCK_PID_ENTRIES 10240
 
 // 5-tuple + pid identifies a unique traffic flow per process.
 // saddr/daddr are 16 bytes to hold both IPv4 (first 4 bytes, rest zero)
@@ -43,6 +44,7 @@ struct proc_stats {
     __u64 tx_packets;
     __u64 rx_packets;
     __u64 last_ns;
+    __u64 retrans_bytes;
     char  comm[16];
 };
 
@@ -60,12 +62,25 @@ struct {
     __type(value, struct proc_stats);
 } proc_stats_map SEC(".maps");
 
+// Maps a socket pointer to its owning PID, populated in user-context kprobes.
+// Allows tcp_retransmit_skb (which runs in softirq/timer context) to find the PID.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, MAX_SOCK_PID_ENTRIES);
+    __type(key, __u64);
+    __type(value, __u32);
+} sock_pid_map SEC(".maps");
+
 static __always_inline void
 record_traffic(struct sock *sk, __u64 bytes, bool is_tx, __u8 proto) {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
     if (pid == 0)
         return;
+
+    // Register socket → PID so tcp_retransmit_skb can find the owner.
+    __u64 sk_ptr = (__u64)(uintptr_t)sk;
+    bpf_map_update_elem(&sock_pid_map, &sk_ptr, &pid, BPF_ANY);
 
     __u16 family = BPF_CORE_READ(sk, __sk_common.skc_family);
     if (family != AF_INET && family != AF_INET6)
@@ -169,6 +184,26 @@ int BPF_KPROBE(kprobe_skb_consume_udp, struct sock *sk, struct sk_buff *skb, int
     if (len <= 0)
         return 0;
     record_traffic(sk, (__u64)len, false, IPPROTO_UDP);
+    return 0;
+}
+
+// tcp_retransmit_skb fires in softirq context, so bpf_get_current_pid_tgid()
+// returns the interrupted kernel thread, not the socket owner. We look up the
+// PID from sock_pid_map which was populated when the socket first sent/received.
+SEC("kprobe/tcp_retransmit_skb")
+int BPF_KPROBE(kprobe_tcp_retransmit_skb, struct sock *sk, struct sk_buff *skb) {
+    __u64 sk_ptr = (__u64)(uintptr_t)sk;
+    __u32 *pidp = bpf_map_lookup_elem(&sock_pid_map, &sk_ptr);
+    if (!pidp)
+        return 0;
+    __u32 pid = *pidp;
+
+    struct proc_stats *ps = bpf_map_lookup_elem(&proc_stats_map, &pid);
+    if (!ps)
+        return 0;
+
+    __u32 len = BPF_CORE_READ(skb, len);
+    __sync_fetch_and_add(&ps->retrans_bytes, (__u64)len);
     return 0;
 }
 
