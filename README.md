@@ -103,6 +103,25 @@ Incredibly useful when you're staring at some IP and wondering why your laptop i
 
 ---
 
+## Focus on a specific process
+
+Skip the process list and jump straight to what you care about:
+
+```bash
+# by PID — opens connection detail view directly
+sudo pktz --pid 1234
+
+# by name — filters the list to matching processes
+sudo pktz --app firefox
+sudo pktz --app /usr/bin/google-chrome   # path works too, basename is extracted
+```
+
+`--app` does a case-insensitive substring match against the process name, so `--app chrom` catches both `chrome` and `chromium`. The footer shows `app:firefox` as a reminder that a filter is active. You can still use `/` on top of it to narrow down further.
+
+Both flags work with `--log` and `--metrics` too.
+
+---
+
 ## Log mode — pipe it anywhere
 
 ```bash
