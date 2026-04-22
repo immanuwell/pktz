@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
@@ -27,7 +28,19 @@ func main() {
 	logMode := flag.Bool("log", false, "emit newline-delimited JSON to stdout instead of starting the TUI")
 	demoMode := flag.Bool("demo", false, "anonymize all IPs and hostnames for safe screen-sharing")
 	fakeProcsFlag := flag.String("fake-processes", "", "comma-separated list of fake process names to inject (implies --demo)")
+	pidFlag := flag.Uint("pid", 0, "open connection detail for this PID on startup")
+	appFlag := flag.String("app", "", "show only processes matching this name or path (e.g. firefox, /usr/bin/chrome)")
 	flag.Parse()
+
+	initialPID := uint32(*pidFlag)
+	appFilter := normalizeAppFilter(*appFlag)
+
+	if initialPID != 0 {
+		if _, err := os.Stat(fmt.Sprintf("/proc/%d", initialPID)); err != nil {
+			fmt.Fprintf(os.Stderr, "pktz: pid %d not found\n", initialPID)
+			os.Exit(1)
+		}
+	}
 
 	var anon *demo.Anonymizer
 	if *demoMode || *fakeProcsFlag != "" {
@@ -78,7 +91,7 @@ func main() {
 	go c.Run()
 
 	if *logMode {
-		runLog(c, anon)
+		runLog(c, anon, initialPID, appFilter)
 		return
 	}
 
@@ -94,7 +107,7 @@ func main() {
 		}
 	}
 
-	p := tea.NewProgram(tui.New(c, res, geo, anon), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(tui.New(c, res, geo, anon, initialPID, appFilter), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "pktz: %v\n", err)
 		os.Exit(1)
@@ -134,7 +147,7 @@ type connRecord struct {
 
 // runLog polls the collector every 500 ms and writes NDJSON to stdout.
 // It exits silently on a broken pipe (e.g. the consumer closed the pipe).
-func runLog(c *collector.Collector, anon *demo.Anonymizer) {
+func runLog(c *collector.Collector, anon *demo.Anonymizer, pidFilter uint32, appFilter string) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -153,6 +166,12 @@ func runLog(c *collector.Collector, anon *demo.Anonymizer) {
 		})
 
 		for _, p := range procs {
+			if pidFilter != 0 && p.PID != pidFilter {
+				continue
+			}
+			if appFilter != "" && !strings.Contains(strings.ToLower(p.Comm), appFilter) {
+				continue
+			}
 			if err := enc.Encode(procRecord{
 				Type:    "process",
 				Ts:      now,
@@ -209,6 +228,19 @@ func runLog(c *collector.Collector, anon *demo.Anonymizer) {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+// normalizeAppFilter extracts a lowercase basename from a path, or lowercases a plain name.
+// "/usr/bin/google-chrome" → "google-chrome", "Firefox" → "firefox"
+func normalizeAppFilter(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if strings.Contains(s, "/") {
+		s = filepath.Base(s)
+	}
+	return strings.ToLower(s)
+}
 
 func isPermissionErr(err error) bool {
 	return errors.Is(err, os.ErrPermission) ||

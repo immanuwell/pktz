@@ -4,6 +4,7 @@ package tui
 import (
 	"fmt"
 	"net"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -126,22 +127,25 @@ type Model struct {
 	history      []collector.HistoryEntry
 	filterInput  textinput.Model
 	filtering    bool
+	appFilter    string // permanent filter set by --app flag; empty = disabled
 	err          error
 }
 
 // New creates a Model backed by the given collector, resolver, optional GeoIP DB,
 // and optional anonymizer (nil when not running in demo mode).
-func New(c *collector.Collector, res *resolver.Resolver, geo *geoip.DB, anon *demo.Anonymizer) Model {
+// initialPID, if non-zero, opens the connection detail view for that PID on startup.
+// appFilter, if non-empty, permanently filters the process list to matching names.
+func New(c *collector.Collector, res *resolver.Resolver, geo *geoip.DB, anon *demo.Anonymizer, initialPID uint32, appFilter string) Model {
 	fi := textinput.New()
 	fi.Placeholder = "filter…"
 	fi.CharLimit = 32
 
-	return Model{
+	m := Model{
 		coll:         c,
 		res:          res,
 		sortBy:       sortByName,
-		sortAsc:      true, // default: alphabetical A→Z
-		pidColW:      5,    // minimum; grows dynamically with observed PIDs
+		sortAsc:      true,
+		pidColW:      5,
 		mouseEnabled: true,
 		resolveNames: true,
 		compactIPv6:  true,
@@ -150,7 +154,18 @@ func New(c *collector.Collector, res *resolver.Resolver, geo *geoip.DB, anon *de
 		showGeo:      geo != nil,
 		anon:         anon,
 		filterInput:  fi,
+		appFilter:    appFilter,
 	}
+
+	if initialPID != 0 {
+		m.activeView = viewConnDetail
+		m.detailPID = initialPID
+		m.detailComm = readComm(initialPID)
+		m.graphPID = initialPID
+		m.graphName = m.detailComm
+	}
+
+	return m
 }
 
 // --- Init ---
@@ -178,7 +193,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(tickCmd(), fetchStats(m.coll, m.detailPID, m.activeView, m.graphPID, m.anon))
 
 	case statsMsg:
-		m.procs = applyFilter(msg.procs, m.filterInput.Value())
+		m.procs = applyFilter(applyAppFilter(msg.procs, m.appFilter), m.filterInput.Value())
 		sortProcs(m.procs, m.sortBy, m.sortAsc)
 		m.pidColW = calcPIDColWidth(msg.procs) // use full unfiltered list for width
 		m.conns = msg.conns
@@ -684,6 +699,9 @@ func (m Model) renderFooter() string {
 		left = filterStyle.Render("/") + " " + m.filterInput.View()
 	} else if m.activeView == viewProcessList {
 		left = dimStyle.Render(fmt.Sprintf("%d process(es)", len(m.procs)))
+		if m.appFilter != "" {
+			left = filterStyle.Render("app:"+m.appFilter) + "  " + left
+		}
 	} else {
 		left = dimStyle.Render(fmt.Sprintf("%d connection(s)", len(m.conns)))
 	}
@@ -818,6 +836,21 @@ func visibleRange(cursor, total, rows int) (int, int) {
 	return start, end
 }
 
+// applyAppFilter is the permanent filter applied by the --app flag.
+// It matches case-insensitively against the process comm name.
+func applyAppFilter(procs []collector.ProcessInfo, filter string) []collector.ProcessInfo {
+	if filter == "" {
+		return procs
+	}
+	out := procs[:0:0]
+	for _, p := range procs {
+		if strings.Contains(strings.ToLower(p.Comm), filter) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 func applyFilter(procs []collector.ProcessInfo, q string) []collector.ProcessInfo {
 	if q == "" {
 		return procs
@@ -899,6 +932,15 @@ func calcPIDColWidth(procs []collector.ProcessInfo) int {
 		}
 	}
 	return w + 2
+}
+
+// readComm reads the process name from /proc/<pid>/comm.
+func readComm(pid uint32) string {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	if err != nil {
+		return fmt.Sprintf("pid%d", pid)
+	}
+	return strings.TrimSpace(string(data))
 }
 
 func digitCount(n uint32) int {
