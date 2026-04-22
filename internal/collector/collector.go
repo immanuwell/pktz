@@ -81,6 +81,9 @@ type Collector struct {
 	prevProc       map[uint32]procSnapshot
 	prevConn       map[ebpfConnKey]connSnapshot
 	containerNames map[string]string // container ID → resolved name; populated lazily
+
+	prevIface map[string]ifaceSnapshot
+	ifaces    []IfaceInfo // updated each poll; read via Interfaces()
 }
 
 // New loads the eBPF programs and attaches kprobes.
@@ -102,6 +105,7 @@ func New() (*Collector, error) {
 		prevProc:       make(map[uint32]procSnapshot),
 		prevConn:       make(map[ebpfConnKey]connSnapshot),
 		containerNames: make(map[string]string),
+		prevIface:      make(map[string]ifaceSnapshot),
 	}
 
 	// required probes — fatal if missing
@@ -171,6 +175,13 @@ func (c *Collector) Processes() []ProcessInfo {
 		out = append(out, *p)
 	}
 	return out
+}
+
+// Interfaces returns a snapshot of active network interfaces with current rates.
+func (c *Collector) Interfaces() []IfaceInfo {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return append([]IfaceInfo(nil), c.ifaces...)
 }
 
 // History returns up to maxHistoryLen bandwidth samples for pid, oldest first.
@@ -328,9 +339,12 @@ func (c *Collector) poll() {
 		c.history[pid] = h
 	}
 
+	newIfaces := c.pollIfaces(now)
+
 	c.mu.Lock()
 	c.procs = newProcs
 	c.connsByPID = newConnsByPID
+	c.ifaces = newIfaces
 	c.mu.Unlock()
 }
 

@@ -110,6 +110,7 @@ type statsMsg struct {
 	procs   []collector.ProcessInfo
 	conns   []collector.ConnInfo
 	history []collector.HistoryEntry
+	ifaces  []collector.IfaceInfo
 }
 
 // connID is a comparable 5-tuple that uniquely identifies a connection row.
@@ -162,6 +163,7 @@ type Model struct {
 	appFilter    string // permanent filter set by --app flag; empty = disabled
 	procRows      []procRow
 	containerRows []containerRow
+	ifaces        []collector.IfaceInfo
 	groupExpanded map[uint32]bool // key = parent PID; true = expanded
 	err          error
 }
@@ -233,6 +235,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		sortProcs(m.procs, m.sortBy, m.sortAsc)
 		m.rebuildProcRows()
 		m.rebuildContainerRows()
+		m.ifaces = msg.ifaces
 		m.pidColW = calcPIDColWidth(msg.procs) // use full unfiltered list for width
 		m.conns = msg.conns
 		sortConns(m.conns)
@@ -524,6 +527,7 @@ func fetchStats(c *collector.Collector, pid uint32, v view, graphPID uint32, ano
 			procs:   procs,
 			conns:   conns,
 			history: c.History(graphPID),
+			ifaces:  c.Interfaces(),
 		}
 	}
 }
@@ -561,11 +565,64 @@ func (m Model) renderHeader() string {
 		right = dimStyle.Render(fmt.Sprintf("sort: %s %s  [s]cycle", m.sortBy.label(), arrow))
 	}
 
-	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
+	leftW := lipgloss.Width(left)
+	rightW := lipgloss.Width(right)
+
+	// Fit the interface utilisation bar in the gap when there is room.
+	center := m.renderIfaceBar()
+	if center != "" {
+		centerW := lipgloss.Width(center)
+		spare := m.width - leftW - rightW - centerW
+		if spare >= 4 { // need at least 2 spaces of padding on each side
+			pad1 := spare / 2
+			pad2 := spare - pad1
+			return left + strings.Repeat(" ", pad1) + center + strings.Repeat(" ", pad2) + right
+		}
+	}
+
+	gap := m.width - leftW - rightW
 	if gap < 1 {
 		gap = 1
 	}
 	return left + strings.Repeat(" ", gap) + right
+}
+
+// renderIfaceBar builds a compact utilisation string for active network
+// interfaces. Up to two interfaces are shown; extras are silently dropped.
+func (m Model) renderIfaceBar() string {
+	if len(m.ifaces) == 0 {
+		return ""
+	}
+	limit := 2
+	if len(m.ifaces) < limit {
+		limit = len(m.ifaces)
+	}
+	parts := make([]string, 0, limit)
+	for _, iface := range m.ifaces[:limit] {
+		combined := iface.RxRate + iface.TxRate
+		name := dimStyle.Render(iface.Name)
+		if iface.SpeedBps > 0 {
+			pct := int(combined * 100 / float64(iface.SpeedBps))
+			if pct > 100 {
+				pct = 100
+			}
+			filled := pct * 8 / 100
+			bar := strings.Repeat("▓", filled) + strings.Repeat("░", 8-filled)
+			var barStyle lipgloss.Style
+			switch {
+			case pct >= 80:
+				barStyle = errorStyle
+			case pct >= 60:
+				barStyle = rateMidStyle
+			default:
+				barStyle = rateHighStyle
+			}
+			parts = append(parts, name+" "+barStyle.Render(bar)+" "+dimStyle.Render(fmt.Sprintf("%d%%", pct)))
+		} else {
+			parts = append(parts, name+" "+dimStyle.Render("↕ "+formatBytes(combined)+"/s"))
+		}
+	}
+	return strings.Join(parts, dimStyle.Render("  ·  "))
 }
 
 func (m Model) renderTable() string {
