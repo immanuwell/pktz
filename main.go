@@ -28,8 +28,9 @@ func main() {
 	logMode := flag.Bool("log", false, "emit newline-delimited JSON to stdout instead of starting the TUI")
 	demoMode := flag.Bool("demo", false, "anonymize all IPs and hostnames for safe screen-sharing")
 	fakeProcsFlag := flag.String("fake-processes", "", "comma-separated list of fake process names to inject (implies --demo)")
-	pidFlag := flag.Uint("pid", 0, "open connection detail for this PID on startup")
-	appFlag := flag.String("app", "", "show only processes matching this name or path (e.g. firefox, /usr/bin/chrome)")
+	pidFlag     := flag.Uint("pid", 0, "open connection detail for this PID on startup")
+	appFlag     := flag.String("app", "", "show only processes matching this name or path (e.g. firefox, /usr/bin/chrome)")
+	metricsFlag := flag.String("metrics", "", "start Prometheus metrics endpoint on this address (e.g. :9090)")
 	flag.Parse()
 
 	initialPID := uint32(*pidFlag)
@@ -89,6 +90,10 @@ func main() {
 
 	c.Poll()
 	go c.Run()
+
+	if *metricsFlag != "" {
+		go serveMetrics(*metricsFlag, c, anon, initialPID, appFilter)
+	}
 
 	if *logMode {
 		runLog(c, anon, initialPID, appFilter)

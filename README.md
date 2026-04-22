@@ -126,6 +126,45 @@ Plays well with anything that reads stdin. Set and forget.
 
 ---
 
+## Prometheus metrics endpoint
+
+```bash
+sudo pktz --metrics :9090
+```
+
+Starts an HTTP server at `/metrics` alongside the TUI. Prometheus can scrape it immediately. Exposes per-process gauges and counters:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `pktz_process_rx_bytes_per_second` | gauge | Current RX rate |
+| `pktz_process_tx_bytes_per_second` | gauge | Current TX rate |
+| `pktz_process_rx_bytes_total` | counter | Total bytes received |
+| `pktz_process_tx_bytes_total` | counter | Total bytes transmitted |
+| `pktz_process_connections` | gauge | Open connection count |
+
+All metrics are labeled with `pid` and `comm` (process name).
+
+Works with any combination of flags. Headless/daemon use case:
+
+```bash
+# no TUI, just metrics — pipe log to /dev/null
+sudo pktz --metrics :9090 --log > /dev/null
+
+# only expose metrics for one app
+sudo pktz --metrics :9090 --app firefox
+```
+
+Prometheus scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: pktz
+    static_configs:
+      - targets: ['localhost:9090']
+```
+
+---
+
 ## Demo mode — safe for screen sharing
 
 Presenting to an audience and don't want your actual IPs on screen?
