@@ -24,6 +24,7 @@ type view int
 const (
 	viewProcessList view = iota
 	viewConnDetail
+	viewContainerList
 )
 
 // sortKey controls the ordering of the process list.
@@ -68,7 +69,22 @@ var (
 	procListCols     = []int{7, 22, 11, 11, 11, 11, 5}
 	procListHeaders  = []string{"PID", "PROCESS", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "CONN"}
 	procListSortKeys = []sortKey{sortByPID, sortByName, sortByRx, sortByTx, sortByTotal, sortByTotal, sortByConn}
+
+	containerListCols    = []int{24, 6, 11, 11, 11, 11, 5}
+	containerListHeaders = []string{"CONTAINER", "PROCS", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "CONN"}
 )
+
+// containerRow is one entry in the container aggregation view, summing all
+// processes that share the same ContainerName (or "host" for bare-metal processes).
+type containerRow struct {
+	name      string
+	procCount int
+	rxRate    float64
+	txRate    float64
+	rxTotal   uint64
+	txTotal   uint64
+	conns     int
+}
 
 // procRow is one visible entry in the process list — standalone, group header,
 // or an expanded child. The slice is rebuilt whenever m.procs or expansion state changes.
@@ -144,7 +160,8 @@ type Model struct {
 	filterInput  textinput.Model
 	filtering    bool
 	appFilter    string // permanent filter set by --app flag; empty = disabled
-	procRows     []procRow
+	procRows      []procRow
+	containerRows []containerRow
 	groupExpanded map[uint32]bool // key = parent PID; true = expanded
 	err          error
 }
@@ -215,6 +232,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.procs = applyFilter(applyAppFilter(msg.procs, m.appFilter), m.filterInput.Value())
 		sortProcs(m.procs, m.sortBy, m.sortAsc)
 		m.rebuildProcRows()
+		m.rebuildContainerRows()
 		m.pidColW = calcPIDColWidth(msg.procs) // use full unfiltered list for width
 		m.conns = msg.conns
 		sortConns(m.conns)
@@ -355,6 +373,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.compactIPv6 = !m.compactIPv6
 		m.updateRemoteColW()
 
+	case "c":
+		if m.activeView == viewProcessList {
+			m.activeView = viewContainerList
+			m.cursor = 0
+			m.graphPID = 0
+			m.graphName = ""
+		} else if m.activeView == viewContainerList {
+			m.activeView = viewProcessList
+			m.cursor = 0
+		}
+
 	case "g":
 		if m.geo != nil {
 			m.showGeo = !m.showGeo
@@ -388,6 +417,11 @@ func (m *Model) syncGraphPID() {
 	if m.activeView == viewConnDetail {
 		m.graphPID = m.detailPID
 		m.graphName = m.detailComm
+		return
+	}
+	if m.activeView == viewContainerList {
+		m.graphPID = 0
+		m.graphName = ""
 		return
 	}
 	if len(m.procRows) == 0 {
@@ -459,10 +493,14 @@ func (m Model) graphPanelHeight() int {
 }
 
 func listLen(m Model) int {
-	if m.activeView == viewConnDetail {
+	switch m.activeView {
+	case viewConnDetail:
 		return len(m.conns)
+	case viewContainerList:
+		return len(m.containerRows)
+	default:
+		return len(m.procRows)
 	}
-	return len(m.procRows)
 }
 
 func fetchStats(c *collector.Collector, pid uint32, v view, graphPID uint32, anon *demo.Anonymizer) tea.Cmd {
@@ -510,9 +548,12 @@ func (m Model) renderHeader() string {
 		dimStyle.Render("  network traffic monitor")
 
 	var right string
-	if m.activeView == viewConnDetail {
+	switch m.activeView {
+	case viewConnDetail:
 		right = breadcrumbStyle.Render(fmt.Sprintf(" %s  (pid %d)", m.detailComm, m.detailPID))
-	} else {
+	case viewContainerList:
+		right = breadcrumbStyle.Render(" containers")
+	default:
 		arrow := "▼"
 		if m.sortAsc {
 			arrow = "▲"
@@ -528,10 +569,14 @@ func (m Model) renderHeader() string {
 }
 
 func (m Model) renderTable() string {
-	if m.activeView == viewConnDetail {
+	switch m.activeView {
+	case viewConnDetail:
 		return m.renderConnTable()
+	case viewContainerList:
+		return m.renderContainerTable()
+	default:
+		return m.renderProcTable()
 	}
-	return m.renderProcTable()
 }
 
 func (m Model) renderProcTable() string {
@@ -769,6 +814,8 @@ func (m Model) renderFooter() string {
 	var left string
 	if m.filtering {
 		left = filterStyle.Render("/") + " " + m.filterInput.View()
+	} else if m.activeView == viewContainerList {
+		left = dimStyle.Render(fmt.Sprintf("%d container(s)", len(m.containerRows)))
 	} else if m.activeView == viewProcessList {
 		left = dimStyle.Render(fmt.Sprintf("%d process(es)", len(m.procs)))
 		if m.appFilter != "" {
@@ -791,7 +838,10 @@ func (m Model) renderFooter() string {
 	if !m.compactIPv6 {
 		ipv6Hint = "v:compact IPv6"
 	}
-	if m.activeView == viewProcessList {
+	switch m.activeView {
+	case viewContainerList:
+		keys = helpStyle.Render(fmt.Sprintf("↑↓:nav  c:process view  %s  q:quit", mouseHint))
+	case viewProcessList:
 		groupHint := ""
 		for _, row := range m.procRows {
 			if row.isGroup {
@@ -799,8 +849,8 @@ func (m Model) renderFooter() string {
 				break
 			}
 		}
-		keys = helpStyle.Render(fmt.Sprintf("↑↓:nav  enter:detail  click:sort  /:filter  s:sort%s  %s  q:quit", groupHint, mouseHint))
-	} else {
+		keys = helpStyle.Render(fmt.Sprintf("↑↓:nav  enter:detail  click:sort  /:filter  s:sort%s  c:containers  %s  q:quit", groupHint, mouseHint))
+	default:
 		geoHint := ""
 		if m.geo != nil {
 			if m.showGeo {
@@ -1012,6 +1062,94 @@ func aggregateGroup(parent collector.ProcessInfo, children []collector.ProcessIn
 		agg.conns += kid.ConnCount
 	}
 	return agg
+}
+
+func (m *Model) rebuildContainerRows() {
+	m.containerRows = buildContainerRows(m.procs)
+}
+
+func buildContainerRows(procs []collector.ProcessInfo) []containerRow {
+	index := make(map[string]*containerRow, 8)
+	for _, p := range procs {
+		key := p.ContainerName
+		if key == "" {
+			key = "host"
+		}
+		r, ok := index[key]
+		if !ok {
+			r = &containerRow{name: key}
+			index[key] = r
+		}
+		r.procCount++
+		r.rxRate += p.RxRate
+		r.txRate += p.TxRate
+		r.rxTotal += p.RxTotal
+		r.txTotal += p.TxTotal
+		r.conns += p.ConnCount
+	}
+	rows := make([]containerRow, 0, len(index))
+	for _, r := range index {
+		rows = append(rows, *r)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		return rows[i].rxRate+rows[i].txRate > rows[j].rxRate+rows[j].txRate
+	})
+	return rows
+}
+
+func (m Model) renderContainerTable() string {
+	cols := containerListCols
+
+	var sb strings.Builder
+	sb.WriteString("\n")
+	sb.WriteString(renderCells(containerListHeaders, cols, headerStyle))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render(strings.Repeat("─", m.width)))
+	sb.WriteString("\n")
+
+	if len(m.containerRows) == 0 {
+		sb.WriteString(dimStyle.Render("  waiting for network traffic…"))
+		sb.WriteString("\n")
+		return sb.String()
+	}
+
+	tableRows := m.height - 7 - m.graphPanelHeight()
+	if tableRows < 1 {
+		tableRows = 1
+	}
+
+	start, end := visibleRange(m.cursor, len(m.containerRows), tableRows)
+	for i := start; i < end; i++ {
+		row := m.containerRows[i]
+
+		var nameCell string
+		if row.name == "host" {
+			nameCell = dimStyle.Render(truncate(row.name, cols[0]-1))
+		} else {
+			nameCell = containerBadgeStyle.Render(truncate(row.name, cols[0]-1))
+		}
+
+		rxS := colourRate(row.rxRate).Render(formatBytes(row.rxRate) + "/s")
+		txS := colourRate(row.txRate).Render(formatBytes(row.txRate) + "/s")
+		cells := []string{
+			nameCell,
+			fmt.Sprintf("%d", row.procCount),
+			rxS,
+			txS,
+			formatBytes(float64(row.rxTotal)),
+			formatBytes(float64(row.txTotal)),
+			fmt.Sprintf("%d", row.conns),
+		}
+		style := normalStyle
+		prefix := "  "
+		if i == m.cursor {
+			style = selectedStyle
+			prefix = "▶ "
+		}
+		sb.WriteString(style.Render(prefix + renderCells(cells, cols, style)))
+		sb.WriteString("\n")
+	}
+	return sb.String()
 }
 
 // applyAppFilter is the permanent filter applied by the --app flag.
