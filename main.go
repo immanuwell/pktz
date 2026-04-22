@@ -2,11 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -55,14 +57,19 @@ func main() {
 		return
 	}
 
-	if os.Geteuid() != 0 {
-		fmt.Fprintln(os.Stderr, "pktz requires root privileges (sudo pktz)")
-		os.Exit(1)
-	}
-
 	c, err := collector.New()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "pktz: failed to start: %v\n", err)
+		if isPermissionErr(err) {
+			fmt.Fprintln(os.Stderr, "pktz: insufficient privileges to load eBPF programs.")
+			fmt.Fprintln(os.Stderr, "")
+			fmt.Fprintln(os.Stderr, "  Option A — one-time setcap (no sudo ever again):")
+			fmt.Fprintln(os.Stderr, "    sudo setcap cap_bpf,cap_perfmon,cap_dac_read_search+ep $(which pktz)")
+			fmt.Fprintln(os.Stderr, "")
+			fmt.Fprintln(os.Stderr, "  Option B — run with sudo:")
+			fmt.Fprintln(os.Stderr, "    sudo pktz")
+		} else {
+			fmt.Fprintf(os.Stderr, "pktz: failed to start: %v\n", err)
+		}
 		os.Exit(1)
 	}
 	defer c.Close()
@@ -199,6 +206,14 @@ func runLog(c *collector.Collector, anon *demo.Anonymizer) {
 			}
 		}
 	}
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+func isPermissionErr(err error) bool {
+	return errors.Is(err, os.ErrPermission) ||
+		errors.Is(err, syscall.EPERM) ||
+		errors.Is(err, syscall.EACCES)
 }
 
 // ── download ──────────────────────────────────────────────────────────────────

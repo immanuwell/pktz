@@ -45,7 +45,14 @@ make && sudo mv pktz /usr/local/bin/
 sudo pktz
 ```
 
-Needs root — eBPF socket filters are not exactly a sandbox-friendly API, shocking I know.
+Or, if you'd rather not type `sudo` every time — grant capabilities once and forget about it:
+
+```bash
+sudo setcap cap_bpf,cap_perfmon,cap_dac_read_search+ep $(which pktz)
+pktz   # no sudo needed from here on
+```
+
+`cap_bpf` + `cap_perfmon` load the eBPF programs. `cap_dac_read_search` lets pktz walk `/proc/<pid>/fd/` for every process, not just your own — without it you'd only see connections for processes you own.
 
 ---
 
