@@ -23,11 +23,13 @@ type ProcessInfo struct {
 	PID           uint32
 	PPID          uint32 // parent PID; 0 if unknown
 	Comm          string
-	ContainerName string // human-readable container name or short ID; "" for host processes
+	ContainerName string  // human-readable container name or short ID; "" for host processes
 	RxRate        float64 // bytes/sec since last poll
 	TxRate        float64
 	RxTotal       uint64
 	TxTotal       uint64
+	RxPPS         float64 // packets/sec since last poll
+	TxPPS         float64
 	ConnCount     int
 }
 
@@ -43,18 +45,24 @@ type ConnInfo struct {
 	TxRate  float64
 	RxTotal uint64
 	TxTotal uint64
+	RxPPS   float64 // packets/sec; zero when no eBPF data available yet
+	TxPPS   float64
 }
 
 type procSnapshot struct {
-	txBytes uint64
-	rxBytes uint64
-	at      time.Time
+	txBytes   uint64
+	rxBytes   uint64
+	txPackets uint64
+	rxPackets uint64
+	at        time.Time
 }
 
 type connSnapshot struct {
-	txBytes uint64
-	rxBytes uint64
-	at      time.Time
+	txBytes   uint64
+	rxBytes   uint64
+	txPackets uint64
+	rxPackets uint64
+	at        time.Time
 }
 
 // ebpfConnKey mirrors pktzConnKey but is comparable so it can be used as a map key.
@@ -230,12 +238,18 @@ func (c *Collector) poll() {
 		prev := c.prevProc[pid]
 		dt := now.Sub(prev.at).Seconds()
 
-		var rxRate, txRate float64
+		var rxRate, txRate, rxPPS, txPPS float64
 		if dt > 0 && !prev.at.IsZero() {
 			rxRate = clampPositive(float64(pVal.RxBytes-prev.rxBytes) / dt)
 			txRate = clampPositive(float64(pVal.TxBytes-prev.txBytes) / dt)
+			rxPPS = clampPositive(float64(pVal.RxPackets-prev.rxPackets) / dt)
+			txPPS = clampPositive(float64(pVal.TxPackets-prev.txPackets) / dt)
 		}
-		c.prevProc[pid] = procSnapshot{txBytes: pVal.TxBytes, rxBytes: pVal.RxBytes, at: now}
+		c.prevProc[pid] = procSnapshot{
+			txBytes: pVal.TxBytes, rxBytes: pVal.RxBytes,
+			txPackets: pVal.TxPackets, rxPackets: pVal.RxPackets,
+			at: now,
+		}
 
 		p, ok := newProcs[pid]
 		if !ok {
@@ -255,6 +269,8 @@ func (c *Collector) poll() {
 		p.TxRate = txRate
 		p.RxTotal = pVal.RxBytes
 		p.TxTotal = pVal.TxBytes
+		p.RxPPS = rxPPS
+		p.TxPPS = txPPS
 	}
 
 	// ── Step 3: Build per-PID connection lists ────────────────────────────────
@@ -288,12 +304,18 @@ func (c *Collector) poll() {
 		prev := c.prevConn[ek]
 		dt := now.Sub(prev.at).Seconds()
 
-		var rxRate, txRate float64
+		var rxRate, txRate, rxPPS, txPPS float64
 		if dt > 0 && !prev.at.IsZero() {
 			rxRate = clampPositive(float64(cVal.RxBytes-prev.rxBytes) / dt)
 			txRate = clampPositive(float64(cVal.TxBytes-prev.txBytes) / dt)
+			rxPPS = clampPositive(float64(cVal.RxPackets-prev.rxPackets) / dt)
+			txPPS = clampPositive(float64(cVal.TxPackets-prev.txPackets) / dt)
 		}
-		c.prevConn[ek] = connSnapshot{txBytes: cVal.TxBytes, rxBytes: cVal.RxBytes, at: now}
+		c.prevConn[ek] = connSnapshot{
+			txBytes: cVal.TxBytes, rxBytes: cVal.RxBytes,
+			txPackets: cVal.TxPackets, rxPackets: cVal.RxPackets,
+			at: now,
+		}
 
 		proto := "TCP"
 		if cKey.Proto == 17 {
@@ -316,6 +338,8 @@ func (c *Collector) poll() {
 				conn.TxRate = txRate
 				conn.RxTotal = cVal.RxBytes
 				conn.TxTotal = cVal.TxBytes
+				conn.RxPPS = rxPPS
+				conn.TxPPS = txPPS
 				break
 			}
 		}

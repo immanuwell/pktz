@@ -37,6 +37,7 @@ const (
 	sortByName
 	sortByPID
 	sortByConn
+	sortByPPS
 	sortKeyCount
 )
 
@@ -54,6 +55,8 @@ func (s sortKey) label() string {
 		return "PID"
 	case sortByConn:
 		return "Conn"
+	case sortByPPS:
+		return "PPS"
 	}
 	return ""
 }
@@ -66,9 +69,9 @@ const headerRowY = 2
 // procListCols, procListHeaders, and procListSortKeys define the process table layout.
 // Each index corresponds to one column; sortKey is what clicking that header activates.
 var (
-	procListCols     = []int{7, 22, 11, 11, 11, 11, 5}
-	procListHeaders  = []string{"PID", "PROCESS", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "CONN"}
-	procListSortKeys = []sortKey{sortByPID, sortByName, sortByRx, sortByTx, sortByTotal, sortByTotal, sortByConn}
+	procListCols     = []int{7, 22, 11, 11, 11, 11, 5, 8}
+	procListHeaders  = []string{"PID", "PROCESS", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "CONN", "PPS"}
+	procListSortKeys = []sortKey{sortByPID, sortByName, sortByRx, sortByTx, sortByTotal, sortByTotal, sortByConn, sortByPPS}
 
 	containerListCols    = []int{24, 6, 11, 11, 11, 11, 5}
 	containerListHeaders = []string{"CONTAINER", "PROCS", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "CONN"}
@@ -100,6 +103,7 @@ type procRow struct {
 	aggRxTotal uint64
 	aggTxTotal uint64
 	aggConns   int
+	aggPPS     float64
 }
 
 // tickMsg fires on every refresh interval.
@@ -681,10 +685,12 @@ func (m Model) renderProcTable() string {
 		rxRate, txRate := p.RxRate, p.TxRate
 		rxTotal, txTotal := p.RxTotal, p.TxTotal
 		connCount := p.ConnCount
+		pps := p.RxPPS + p.TxPPS
 		if row.isGroup && !row.isExpanded {
 			rxRate, txRate = row.aggRxRate, row.aggTxRate
 			rxTotal, txTotal = row.aggRxTotal, row.aggTxTotal
 			connCount = row.aggConns
+			pps = row.aggPPS
 		}
 
 		// Comm column: optional container badge + group/child indicator.
@@ -724,6 +730,7 @@ func (m Model) renderProcTable() string {
 			formatBytes(float64(rxTotal)),
 			formatBytes(float64(txTotal)),
 			fmt.Sprintf("%d", connCount),
+			dimStyle.Render(formatPPS(pps)),
 		}
 		style := normalStyle
 		prefix := "  "
@@ -739,11 +746,11 @@ func (m Model) renderProcTable() string {
 
 func (m Model) renderConnTable() string {
 	// Build column list dynamically — GEO column inserted after REMOTE when active.
-	cols := []int{22, m.remoteColW, 5, 13, 9, 9, 9, 9}
-	headers := []string{"LOCAL", "REMOTE", "PROTO", "STATE", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX"}
+	cols := []int{22, m.remoteColW, 5, 13, 9, 9, 9, 9, 8}
+	headers := []string{"LOCAL", "REMOTE", "PROTO", "STATE", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "PPS"}
 	if m.showGeo {
-		cols = []int{22, m.remoteColW, 20, 5, 13, 9, 9, 9, 9}
-		headers = []string{"LOCAL", "REMOTE", "GEO", "PROTO", "STATE", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX"}
+		cols = []int{22, m.remoteColW, 20, 5, 13, 9, 9, 9, 9, 8}
+		headers = []string{"LOCAL", "REMOTE", "GEO", "PROTO", "STATE", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "PPS"}
 	}
 
 	var sb strings.Builder
@@ -789,6 +796,7 @@ func (m Model) renderConnTable() string {
 			txS,
 			formatBytes(float64(c.RxTotal)),
 			formatBytes(float64(c.TxTotal)),
+			dimStyle.Render(formatPPS(c.RxPPS+c.TxPPS)),
 		)
 
 		// ▼ = inbound (process is the server: listening socket or privileged local port).
@@ -1087,6 +1095,7 @@ func buildProcRows(procs []collector.ProcessInfo, expanded map[uint32]bool) []pr
 				aggRxTotal: agg.rxTotal,
 				aggTxTotal: agg.txTotal,
 				aggConns:   agg.conns,
+				aggPPS:     agg.pps,
 			})
 			if exp {
 				for _, kid := range kids {
@@ -1106,6 +1115,7 @@ type groupAggregate struct {
 	rxTotal uint64
 	txTotal uint64
 	conns   int
+	pps     float64
 }
 
 func aggregateGroup(parent collector.ProcessInfo, children []collector.ProcessInfo) groupAggregate {
@@ -1115,6 +1125,7 @@ func aggregateGroup(parent collector.ProcessInfo, children []collector.ProcessIn
 		rxTotal: parent.RxTotal,
 		txTotal: parent.TxTotal,
 		conns:   parent.ConnCount,
+		pps:     parent.RxPPS + parent.TxPPS,
 	}
 	for _, kid := range children {
 		agg.rxRate += kid.RxRate
@@ -1122,6 +1133,7 @@ func aggregateGroup(parent collector.ProcessInfo, children []collector.ProcessIn
 		agg.rxTotal += kid.RxTotal
 		agg.txTotal += kid.TxTotal
 		agg.conns += kid.ConnCount
+		agg.pps += kid.RxPPS + kid.TxPPS
 	}
 	return agg
 }
@@ -1259,6 +1271,8 @@ func sortProcs(procs []collector.ProcessInfo, by sortKey, asc bool) {
 			less = a.PID < b.PID
 		case sortByConn:
 			less = a.ConnCount < b.ConnCount
+		case sortByPPS:
+			less = (a.RxPPS + a.TxPPS) < (b.RxPPS + b.TxPPS)
 		default: // sortByRx
 			less = a.RxRate < b.RxRate
 		}
@@ -1285,6 +1299,17 @@ func formatBytes(b float64) string {
 		return fmt.Sprintf("%.1f KB", b/1_024)
 	default:
 		return fmt.Sprintf("%.0f B", b)
+	}
+}
+
+func formatPPS(pps float64) string {
+	switch {
+	case pps >= 999_950:
+		return fmt.Sprintf("%.1fM/s", pps/1_000_000)
+	case pps >= 1_000:
+		return fmt.Sprintf("%.1fK/s", pps/1_000)
+	default:
+		return fmt.Sprintf("%.0f/s", pps)
 	}
 }
 
