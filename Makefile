@@ -1,9 +1,10 @@
-.PHONY: all build generate vmlinux clean
+.PHONY: all build generate vmlinux install clean
 
 BINARY   := pktz
 MODULE   := github.com/immanuwell/pktz
 BPF_SRC  := bpf/pktz.c
 VMLINUX  := bpf/vmlinux.h
+PREFIX   ?= /usr/local
 
 all: generate build
 
@@ -15,6 +16,9 @@ generate: vmlinux
 
 build:
 	go build -o $(BINARY) .
+
+install: build
+	sudo install -m 0755 $(BINARY) $(PREFIX)/bin/$(BINARY)
 
 clean:
 	rm -f $(BINARY) $(VMLINUX)
