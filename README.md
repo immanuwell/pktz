@@ -47,6 +47,15 @@ sudo pktz
 
 Needs root to load eBPF programs and read `/proc/<pid>/fd/` for all processes — same deal as `sudo iotop`, `sudo tcpdump`, etc.
 
+If you really hate typing sudo, you can grant capabilities once:
+
+```bash
+sudo setcap cap_bpf,cap_perfmon,cap_dac_read_search+ep $(which pktz)
+pktz  # no sudo needed
+```
+
+Fair warning though: in this mode pktz will see fewer processes than with sudo — it won't be able to inspect fd dirs of processes owned by root or other users, so their connections won't show up in the detail view. For full visibility, sudo is the way.
+
 ---
 
 ## What you actually get
