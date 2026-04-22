@@ -791,13 +791,18 @@ func (m Model) renderConnTable() string {
 			formatBytes(float64(c.TxTotal)),
 		)
 
-		style := normalStyle
-		prefix := "  "
-		if i == m.cursor {
-			style = selectedStyle
-			prefix = "▶ "
+		// ▼ = inbound (process is the server: listening socket or privileged local port).
+		// ▲ = outbound (process initiated the connection).
+		isInbound := c.State == "LISTEN" || c.SrcPort < 1024
+		dir := "▲ "
+		if isInbound {
+			dir = "▼ "
 		}
-		sb.WriteString(style.Render(prefix + renderCells(row, cols, style)))
+		if i == m.cursor {
+			sb.WriteString(selectedStyle.Render("▶ " + renderCells(row, cols, selectedStyle)))
+		} else {
+			sb.WriteString(dimStyle.Render(dir) + renderCells(row, cols, normalStyle))
+		}
 		sb.WriteString("\n")
 	}
 	return sb.String()
