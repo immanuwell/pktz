@@ -28,7 +28,8 @@ type ProcessInfo struct {
 	TxRate        float64
 	RxTotal       uint64
 	TxTotal       uint64
-	RetransTotal  uint64  // TCP bytes retransmitted since pktz started
+	TxPktsTotal   uint64  // cumulative TX packets since pktz started
+	RetransPkts   uint64  // TCP segments retransmitted since pktz started
 	RxPPS         float64 // packets/sec since last poll
 	TxPPS         float64
 	ConnCount     int
@@ -271,7 +272,8 @@ func (c *Collector) poll() {
 		p.TxRate = txRate
 		p.RxTotal = pVal.RxBytes
 		p.TxTotal = pVal.TxBytes
-		p.RetransTotal = pVal.RetransBytes
+		p.TxPktsTotal = pVal.TxPackets
+		p.RetransPkts = pVal.RetransPkts
 		p.RxPPS = rxPPS
 		p.TxPPS = txPPS
 	}

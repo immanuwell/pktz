@@ -44,7 +44,7 @@ struct proc_stats {
     __u64 tx_packets;
     __u64 rx_packets;
     __u64 last_ns;
-    __u64 retrans_bytes;
+    __u64 retrans_pkts;
     char  comm[16];
 };
 
@@ -202,8 +202,7 @@ int BPF_KPROBE(kprobe_tcp_retransmit_skb, struct sock *sk, struct sk_buff *skb) 
     if (!ps)
         return 0;
 
-    __u32 len = BPF_CORE_READ(skb, len);
-    __sync_fetch_and_add(&ps->retrans_bytes, (__u64)len);
+    __sync_fetch_and_add(&ps->retrans_pkts, 1);
     return 0;
 }
 

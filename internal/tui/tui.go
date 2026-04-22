@@ -59,7 +59,7 @@ func (s sortKey) label() string {
 	case sortByPPS:
 		return "PPS"
 	case sortByRetrans:
-		return "Retrans"
+		return "Loss%"
 	}
 	return ""
 }
@@ -72,8 +72,8 @@ const headerRowY = 2
 // procListCols, procListHeaders, and procListSortKeys define the process table layout.
 // Each index corresponds to one column; sortKey is what clicking that header activates.
 var (
-	procListCols     = []int{7, 22, 11, 11, 11, 11, 5, 8, 9}
-	procListHeaders  = []string{"PID", "PROCESS", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "CONN", "PPS", "RETRANS"}
+	procListCols     = []int{7, 22, 11, 11, 11, 11, 5, 8, 7}
+	procListHeaders  = []string{"PID", "PROCESS", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "CONN", "PPS", "LOSS%"}
 	procListSortKeys = []sortKey{sortByPID, sortByName, sortByRx, sortByTx, sortByTotal, sortByTotal, sortByConn, sortByPPS, sortByRetrans}
 
 	containerListCols    = []int{24, 6, 11, 11, 11, 11, 5}
@@ -101,13 +101,14 @@ type procRow struct {
 	childCount int  // valid when isGroup=true
 	isChild    bool // indented child of a group header
 	// aggregated stats used when the group is collapsed (header + all children)
-	aggRxRate      float64
-	aggTxRate      float64
-	aggRxTotal     uint64
-	aggTxTotal     uint64
-	aggRetransTot  uint64
-	aggConns       int
-	aggPPS         float64
+	aggRxRate       float64
+	aggTxRate       float64
+	aggRxTotal      uint64
+	aggTxTotal      uint64
+	aggTxPktsTotal  uint64
+	aggRetransPkts  uint64
+	aggConns        int
+	aggPPS          float64
 }
 
 // tickMsg fires on every refresh interval.
@@ -688,13 +689,15 @@ func (m Model) renderProcTable() string {
 		// Stats: aggregated for a collapsed group, own stats otherwise.
 		rxRate, txRate := p.RxRate, p.TxRate
 		rxTotal, txTotal := p.RxTotal, p.TxTotal
-		retransTotal := p.RetransTotal
+		txPktsTotal := p.TxPktsTotal
+		retransPkts := p.RetransPkts
 		connCount := p.ConnCount
 		pps := p.RxPPS + p.TxPPS
 		if row.isGroup && !row.isExpanded {
 			rxRate, txRate = row.aggRxRate, row.aggTxRate
 			rxTotal, txTotal = row.aggRxTotal, row.aggTxTotal
-			retransTotal = row.aggRetransTot
+			txPktsTotal = row.aggTxPktsTotal
+			retransPkts = row.aggRetransPkts
 			connCount = row.aggConns
 			pps = row.aggPPS
 		}
@@ -728,12 +731,7 @@ func (m Model) renderProcTable() string {
 
 		rxS := colourRate(rxRate).Render(formatBytes(rxRate) + "/s")
 		txS := colourRate(txRate).Render(formatBytes(txRate) + "/s")
-		var retransCell string
-		if retransTotal > 0 {
-			retransCell = errorStyle.Render(formatBytes(float64(retransTotal)))
-		} else {
-			retransCell = dimStyle.Render("—")
-		}
+		lossCell := formatLoss(retransPkts, txPktsTotal)
 		cells := []string{
 			fmt.Sprintf("%d", p.PID),
 			comm,
@@ -743,7 +741,7 @@ func (m Model) renderProcTable() string {
 			formatBytes(float64(txTotal)),
 			fmt.Sprintf("%d", connCount),
 			dimStyle.Render(formatPPS(pps)),
-			retransCell,
+			lossCell,
 		}
 		style := normalStyle
 		prefix := "  "
@@ -1099,17 +1097,18 @@ func buildProcRows(procs []collector.ProcessInfo, expanded map[uint32]bool) []pr
 			exp := expanded[p.PID]
 			agg := aggregateGroup(p, kids)
 			rows = append(rows, procRow{
-				proc:          p,
-				isGroup:       true,
-				isExpanded:    exp,
-				childCount:    len(kids),
-				aggRxRate:     agg.rxRate,
-				aggTxRate:     agg.txRate,
-				aggRxTotal:    agg.rxTotal,
-				aggTxTotal:    agg.txTotal,
-				aggRetransTot: agg.retransTotal,
-				aggConns:      agg.conns,
-				aggPPS:        agg.pps,
+				proc:           p,
+				isGroup:        true,
+				isExpanded:     exp,
+				childCount:     len(kids),
+				aggRxRate:      agg.rxRate,
+				aggTxRate:      agg.txRate,
+				aggRxTotal:     agg.rxTotal,
+				aggTxTotal:     agg.txTotal,
+				aggTxPktsTotal: agg.txPktsTotal,
+				aggRetransPkts: agg.retransPkts,
+				aggConns:       agg.conns,
+				aggPPS:         agg.pps,
 			})
 			if exp {
 				for _, kid := range kids {
@@ -1124,31 +1123,34 @@ func buildProcRows(procs []collector.ProcessInfo, expanded map[uint32]bool) []pr
 }
 
 type groupAggregate struct {
-	rxRate       float64
-	txRate       float64
-	rxTotal      uint64
-	txTotal      uint64
-	retransTotal uint64
-	conns        int
-	pps          float64
+	rxRate      float64
+	txRate      float64
+	rxTotal     uint64
+	txTotal     uint64
+	txPktsTotal uint64
+	retransPkts uint64
+	conns       int
+	pps         float64
 }
 
 func aggregateGroup(parent collector.ProcessInfo, children []collector.ProcessInfo) groupAggregate {
 	agg := groupAggregate{
-		rxRate:       parent.RxRate,
-		txRate:       parent.TxRate,
-		rxTotal:      parent.RxTotal,
-		txTotal:      parent.TxTotal,
-		retransTotal: parent.RetransTotal,
-		conns:        parent.ConnCount,
-		pps:          parent.RxPPS + parent.TxPPS,
+		rxRate:      parent.RxRate,
+		txRate:      parent.TxRate,
+		rxTotal:     parent.RxTotal,
+		txTotal:     parent.TxTotal,
+		txPktsTotal: parent.TxPktsTotal,
+		retransPkts: parent.RetransPkts,
+		conns:       parent.ConnCount,
+		pps:         parent.RxPPS + parent.TxPPS,
 	}
 	for _, kid := range children {
 		agg.rxRate += kid.RxRate
 		agg.txRate += kid.TxRate
 		agg.rxTotal += kid.RxTotal
 		agg.txTotal += kid.TxTotal
-		agg.retransTotal += kid.RetransTotal
+		agg.txPktsTotal += kid.TxPktsTotal
+		agg.retransPkts += kid.RetransPkts
 		agg.conns += kid.ConnCount
 		agg.pps += kid.RxPPS + kid.TxPPS
 	}
@@ -1291,7 +1293,9 @@ func sortProcs(procs []collector.ProcessInfo, by sortKey, asc bool) {
 		case sortByPPS:
 			less = (a.RxPPS + a.TxPPS) < (b.RxPPS + b.TxPPS)
 		case sortByRetrans:
-			less = a.RetransTotal < b.RetransTotal
+			// sort by loss ratio; treat no-TX-data as 0%
+			ar, br := lossRatio(a.RetransPkts, a.TxPktsTotal), lossRatio(b.RetransPkts, b.TxPktsTotal)
+			less = ar < br
 		default: // sortByRx
 			less = a.RxRate < b.RxRate
 		}
@@ -1329,6 +1333,32 @@ func formatPPS(pps float64) string {
 		return fmt.Sprintf("%.1fK/s", pps/1_000)
 	default:
 		return fmt.Sprintf("%.0f/s", pps)
+	}
+}
+
+// lossRatio returns retransPkts/txPktsTotal, or 0 if txPktsTotal is 0.
+func lossRatio(retrans, txTotal uint64) float64 {
+	if txTotal == 0 {
+		return 0
+	}
+	return float64(retrans) / float64(txTotal)
+}
+
+// formatLoss renders a loss-percentage cell with colour coding.
+// Shows "—" when no TX packets have been observed yet.
+func formatLoss(retrans, txTotal uint64) string {
+	if txTotal == 0 {
+		return dimStyle.Render("—")
+	}
+	pct := lossRatio(retrans, txTotal) * 100
+	s := fmt.Sprintf("%.1f%%", pct)
+	switch {
+	case pct >= 1.0:
+		return errorStyle.Render(s)
+	case pct >= 0.1:
+		return rateMidStyle.Render(s)
+	default:
+		return dimStyle.Render(s)
 	}
 }
 

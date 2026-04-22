@@ -36,14 +36,14 @@ type pktzConnStats struct {
 }
 
 type pktzProcStats struct {
-	_            structs.HostLayout
-	TxBytes      uint64
-	RxBytes      uint64
-	TxPackets    uint64
-	RxPackets    uint64
-	LastNs       uint64
-	RetransBytes uint64
-	Comm         [16]int8
+	_           structs.HostLayout
+	TxBytes     uint64
+	RxBytes     uint64
+	TxPackets   uint64
+	RxPackets   uint64
+	LastNs      uint64
+	RetransPkts uint64
+	Comm        [16]int8
 }
 
 // loadPktz returns the embedded CollectionSpec for pktz.
