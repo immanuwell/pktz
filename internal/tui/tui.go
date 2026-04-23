@@ -984,11 +984,11 @@ func (m Model) renderProcTable() string {
 
 func (m Model) renderConnTable() string {
 	// Build column list dynamically — GEO column inserted after REMOTE when active.
-	cols := []int{22, m.remoteColW, 5, 13, 9, 9, 9, 9, 8}
-	headers := []string{"LOCAL", "REMOTE", "PROTO", "STATE", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "PPS"}
+	cols := []int{22, m.remoteColW, 5, 13, 7, 9, 9, 9, 9, 8}
+	headers := []string{"LOCAL", "REMOTE", "PROTO", "STATE", "RTT", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "PPS"}
 	if m.showGeo {
-		cols = []int{22, m.remoteColW, 20, 5, 13, 9, 9, 9, 9, 8}
-		headers = []string{"LOCAL", "REMOTE", "GEO", "PROTO", "STATE", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "PPS"}
+		cols = []int{22, m.remoteColW, 20, 5, 13, 7, 9, 9, 9, 9, 8}
+		headers = []string{"LOCAL", "REMOTE", "GEO", "PROTO", "STATE", "RTT", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "PPS"}
 	}
 
 	var sb strings.Builder
@@ -1030,6 +1030,7 @@ func (m Model) renderConnTable() string {
 		row = append(row,
 			protoStyle.Render(c.Proto),
 			truncate(c.State, cols[len(row)]-1),
+			formatRTT(c.RTT),
 			rxS,
 			txS,
 			formatBytes(float64(c.RxTotal)),
@@ -1320,11 +1321,11 @@ func (m Model) renderConnPane() string {
 	sb.WriteString(titleLeft + strings.Repeat(" ", titleGap) + paneBar + "\n")
 
 	// Same column layout as renderConnTable.
-	cols := []int{22, m.remoteColW, 5, 13, 9, 9, 9, 9, 8}
-	headers := []string{"LOCAL", "REMOTE", "PROTO", "STATE", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "PPS"}
+	cols := []int{22, m.remoteColW, 5, 13, 7, 9, 9, 9, 9, 8}
+	headers := []string{"LOCAL", "REMOTE", "PROTO", "STATE", "RTT", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "PPS"}
 	if m.showGeo {
-		cols = []int{22, m.remoteColW, 20, 5, 13, 9, 9, 9, 9, 8}
-		headers = []string{"LOCAL", "REMOTE", "GEO", "PROTO", "STATE", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "PPS"}
+		cols = []int{22, m.remoteColW, 20, 5, 13, 7, 9, 9, 9, 9, 8}
+		headers = []string{"LOCAL", "REMOTE", "GEO", "PROTO", "STATE", "RTT", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "PPS"}
 	}
 
 	sb.WriteString("\n")
@@ -1363,6 +1364,7 @@ func (m Model) renderConnPane() string {
 		row = append(row,
 			protoStyle.Render(c.Proto),
 			truncate(c.State, cols[len(row)]-1),
+			formatRTT(c.RTT),
 			rxS,
 			txS,
 			formatBytes(float64(c.RxTotal)),
@@ -1840,6 +1842,26 @@ func formatPPS(pps float64) string {
 		return fmt.Sprintf("%.1fK/s", pps/1_000)
 	default:
 		return fmt.Sprintf("%.0f/s", pps)
+	}
+}
+
+// formatRTT renders a millisecond RTT value with colour coding.
+// Returns dim "—" for zero (UDP, LISTEN, or no measurement yet).
+func formatRTT(ms float64) string {
+	if ms == 0 {
+		return dimStyle.Render("—")
+	}
+	s := fmt.Sprintf("%.0fms", ms)
+	if ms < 1 {
+		s = fmt.Sprintf("%.1fms", ms)
+	}
+	switch {
+	case ms >= 100:
+		return errorStyle.Render(s)
+	case ms >= 30:
+		return rateMidStyle.Render(s)
+	default:
+		return dimStyle.Render(s)
 	}
 }
 

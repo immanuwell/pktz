@@ -32,6 +32,8 @@ type pktzConnStats struct {
 	TxPackets uint64
 	RxPackets uint64
 	LastNs    uint64
+	RttUs     uint32
+	Pad       uint32
 	Comm      [16]int8
 }
 

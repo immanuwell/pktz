@@ -35,6 +35,8 @@ struct conn_stats {
     __u64 tx_packets;
     __u64 rx_packets;
     __u64 last_ns;
+    __u32 rtt_us;  // smoothed RTT in microseconds; 0 until first measurement
+    __u32 _pad;
     char  comm[16];
 };
 
@@ -125,6 +127,13 @@ record_traffic(struct sock *sk, __u64 bytes, bool is_tx, __u8 proto) {
         __sync_fetch_and_add(&cs->rx_packets, 1);
     }
     cs->last_ns = bpf_ktime_get_ns();
+    // Read smoothed RTT from tcp_sock.srtt_us (stored << 3; divide by 8 for actual μs).
+    if (proto == IPPROTO_TCP) {
+        struct tcp_sock *tp = (struct tcp_sock *)sk;
+        __u32 srtt = BPF_CORE_READ(tp, srtt_us);
+        if (srtt > 0)
+            cs->rtt_us = srtt >> 3;
+    }
 
     // Update per-process aggregate stats
     struct proc_stats *ps = bpf_map_lookup_elem(&proc_stats_map, &pid);

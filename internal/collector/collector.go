@@ -49,6 +49,7 @@ type ConnInfo struct {
 	TxTotal uint64
 	RxPPS   float64 // packets/sec; zero when no eBPF data available yet
 	TxPPS   float64
+	RTT     float64 // smoothed RTT in milliseconds; 0 when not available (UDP, LISTEN, etc.)
 }
 
 type procSnapshot struct {
@@ -345,6 +346,9 @@ func (c *Collector) poll() {
 				conn.TxTotal = cVal.TxBytes
 				conn.RxPPS = rxPPS
 				conn.TxPPS = txPPS
+				if cVal.RttUs > 0 {
+					conn.RTT = float64(cVal.RttUs) / 1000.0 // μs → ms
+				}
 				break
 			}
 		}
