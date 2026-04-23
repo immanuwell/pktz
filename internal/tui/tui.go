@@ -1293,12 +1293,33 @@ func (m Model) renderProcessPane() string {
 	if len(m.graphCmdline) == 0 {
 		writeLine(dimStyle.Render("   (not available)"))
 	} else {
-		// First token is the executable; rest are arguments.
-		exe := m.graphCmdline[0]
-		writeLine("   " + graphTitleStyle.Render(exe))
-		for _, arg := range m.graphCmdline[1:] {
-			if !writeLine(dimStyle.Render("   " + arg)) {
+		const firstIndent = "   "
+		const contIndent  = "     " // 2 extra spaces marks a continuation line
+		availW := m.width - len(firstIndent)
+		if availW < 10 {
+			availW = 10
+		}
+
+		// Executable path — first token.
+		for i, chunk := range wrapToWidth(m.graphCmdline[0], availW) {
+			indent := firstIndent
+			if i > 0 {
+				indent = contIndent
+			}
+			if !writeLine(indent + graphTitleStyle.Render(chunk)) {
 				return sb.String()
+			}
+		}
+		// Arguments — remaining tokens.
+		for _, arg := range m.graphCmdline[1:] {
+			for i, chunk := range wrapToWidth(arg, availW) {
+				indent := firstIndent
+				if i > 0 {
+					indent = contIndent
+				}
+				if !writeLine(dimStyle.Render(indent + chunk)) {
+					return sb.String()
+				}
 			}
 		}
 	}
@@ -1708,6 +1729,26 @@ func formatLoss(retrans, txTotal uint64) string {
 	default:
 		return dimStyle.Render(s)
 	}
+}
+
+// wrapToWidth splits s into chunks of at most width runes each.
+func wrapToWidth(s string, width int) []string {
+	if width <= 0 {
+		return []string{s}
+	}
+	runes := []rune(s)
+	if len(runes) <= width {
+		return []string{s}
+	}
+	var out []string
+	for len(runes) > width {
+		out = append(out, string(runes[:width]))
+		runes = runes[width:]
+	}
+	if len(runes) > 0 {
+		out = append(out, string(runes))
+	}
+	return out
 }
 
 func truncate(s string, n int) string {
