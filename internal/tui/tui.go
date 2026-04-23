@@ -230,7 +230,11 @@ func New(c *collector.Collector, res *resolver.Resolver, geo *geoip.DB, anon *de
 // --- Init ---
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(fetchStats(m.coll, m.detailPID, m.activeView, m.graphPID, m.anon), tickCmd())
+	return tea.Batch(
+		fetchStats(m.coll, m.detailPID, m.activeView, m.graphPID, m.anon),
+		tickCmd(),
+		func() tea.Msg { return tea.EnableMouseCellMotion() },
+	)
 }
 
 func tickCmd() tea.Cmd {
