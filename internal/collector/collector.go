@@ -15,6 +15,7 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
 )
 
@@ -95,6 +96,13 @@ type Collector struct {
 
 	prevIface map[string]ifaceSnapshot
 	ifaces    []IfaceInfo // updated each poll; read via Interfaces()
+
+	// DNS tracking — protected by dnsMu (separate from mu to avoid lock ordering issues).
+	dnsRdr     *ringbuf.Reader
+	dnsMu      sync.RWMutex
+	dnsHistory map[uint32][]DNSRecord
+	dnsPending map[dnsKey]pendingDNS
+	dnsNames   map[uint32]map[string]string // pid → IP string → domain name
 }
 
 // New loads the eBPF programs and attaches kprobes.
@@ -108,6 +116,12 @@ func New() (*Collector, error) {
 		return nil, fmt.Errorf("load eBPF objects: %w", err)
 	}
 
+	dnsRdr, err := ringbuf.NewReader(objs.DnsEvents)
+	if err != nil {
+		objs.Close()
+		return nil, fmt.Errorf("open dns ringbuf: %w", err)
+	}
+
 	c := &Collector{
 		objs:           objs,
 		procs:          make(map[uint32]*ProcessInfo),
@@ -117,6 +131,10 @@ func New() (*Collector, error) {
 		prevConn:       make(map[ebpfConnKey]connSnapshot),
 		containerNames: make(map[string]string),
 		prevIface:      make(map[string]ifaceSnapshot),
+		dnsRdr:         dnsRdr,
+		dnsHistory:     make(map[uint32][]DNSRecord),
+		dnsPending:     make(map[dnsKey]pendingDNS),
+		dnsNames:       make(map[uint32]map[string]string),
 	}
 
 	// required probes — fatal if missing
@@ -163,6 +181,7 @@ func (c *Collector) Poll() {
 
 // Run polls eBPF maps and /proc/net every 300 ms. Call in a goroutine.
 func (c *Collector) Run() {
+	go c.runDNS()
 	ticker := time.NewTicker(300 * time.Millisecond)
 	defer ticker.Stop()
 	for range ticker.C {
@@ -172,6 +191,9 @@ func (c *Collector) Run() {
 
 // Close detaches probes and frees eBPF resources.
 func (c *Collector) Close() {
+	if c.dnsRdr != nil {
+		c.dnsRdr.Close()
+	}
 	for _, l := range c.links {
 		l.Close()
 	}
@@ -212,6 +234,7 @@ func (c *Collector) Connections(pid uint32) []ConnInfo {
 
 func (c *Collector) poll() {
 	now := time.Now()
+	c.expirePendingDNS(now)
 
 	// ── Step 1: /proc/net scan gives us ALL processes with open sockets ──────
 	rawConns := ScanNetConnections()

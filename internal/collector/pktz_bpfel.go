@@ -103,6 +103,7 @@ type pktzProgramSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type pktzMapSpecs struct {
 	ConnStatsMap *ebpf.MapSpec `ebpf:"conn_stats_map"`
+	DnsEvents    *ebpf.MapSpec `ebpf:"dns_events"`
 	ProcStatsMap *ebpf.MapSpec `ebpf:"proc_stats_map"`
 	SockPidMap   *ebpf.MapSpec `ebpf:"sock_pid_map"`
 }
@@ -134,6 +135,7 @@ func (o *pktzObjects) Close() error {
 // It can be passed to loadPktzObjects or ebpf.CollectionSpec.LoadAndAssign.
 type pktzMaps struct {
 	ConnStatsMap *ebpf.Map `ebpf:"conn_stats_map"`
+	DnsEvents    *ebpf.Map `ebpf:"dns_events"`
 	ProcStatsMap *ebpf.Map `ebpf:"proc_stats_map"`
 	SockPidMap   *ebpf.Map `ebpf:"sock_pid_map"`
 }
@@ -141,6 +143,7 @@ type pktzMaps struct {
 func (m *pktzMaps) Close() error {
 	return _PktzClose(
 		m.ConnStatsMap,
+		m.DnsEvents,
 		m.ProcStatsMap,
 		m.SockPidMap,
 	)

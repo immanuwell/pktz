@@ -33,7 +33,8 @@ const (
 	detailPaneConns   = 1
 	detailPaneProcess = 2
 	detailPaneTcpdump = 3
-	numDetailPanes    = 4
+	detailPaneDNS     = 4
+	numDetailPanes    = 5
 )
 
 // sortKey controls the ordering of the process list.
@@ -132,6 +133,7 @@ type statsMsg struct {
 	graphCwd     string
 	history      []collector.HistoryEntry
 	ifaces       []collector.IfaceInfo
+	graphDNS     []collector.DNSRecord
 }
 
 // connID is a comparable 5-tuple that uniquely identifies a connection row.
@@ -182,7 +184,8 @@ type Model struct {
 	graphConns     []collector.ConnInfo // connections for graphPID; used by conns pane
 	graphCmdline   []string             // argv for graphPID; used by process pane
 	graphCwd       string               // working directory for graphPID
-	detailPane     int                  // 0=graphs, 1=connections, 2=process, 3=tcpdump
+	graphDNS       []collector.DNSRecord // DNS history for graphPID; used by dns pane
+	detailPane     int                  // 0=graphs, 1=connections, 2=process, 3=tcpdump, 4=dns
 	detailFocused  bool                 // true when keyboard focus is in the detail pane
 	connPaneCursor int                  // scroll cursor within the conns pane
 	tcpdump        *tcpdumpState        // non-nil while [tcpdump] pane is open
@@ -283,6 +286,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.history = msg.history
+		m.graphDNS = msg.graphDNS
 		m.updateRemoteColW()
 		if n := listLen(m); m.cursor >= n && n > 0 {
 			m.cursor = n - 1
@@ -393,6 +397,7 @@ func (m Model) paneBarHitTest(x int) (int, bool) {
 		{detailPaneConns, "conns"},
 		{detailPaneProcess, "process"},
 		{detailPaneTcpdump, "tcpdump"},
+		{detailPaneDNS, "dns"},
 	}
 
 	// Bar is right-aligned; compute its starting X from its plain-text width.
@@ -764,6 +769,7 @@ func fetchStats(c *collector.Collector, pid uint32, v view, graphPID uint32, ano
 			graphCwd:     graphCwd,
 			history:      c.History(graphPID),
 			ifaces:       c.Interfaces(),
+			graphDNS:     c.DNSHistory(graphPID),
 		}
 	}
 }
@@ -1261,6 +1267,8 @@ func (m Model) renderDetailPanel() string {
 		return m.renderProcessPane()
 	case detailPaneTcpdump:
 		return m.renderTcpdumpPane()
+	case detailPaneDNS:
+		return m.renderDNSPane()
 	default:
 		return m.renderGraphPanel()
 	}
@@ -1278,6 +1286,7 @@ func (m Model) renderPaneBar() string {
 		{detailPaneConns, "conns"},
 		{detailPaneProcess, "process"},
 		{detailPaneTcpdump, "tcpdump"},
+		{detailPaneDNS, "dns"},
 	}
 	var parts []string
 	for _, e := range all {
@@ -1510,6 +1519,117 @@ func (m Model) renderProcessPane() string {
 		if !writeLine("   " + renderCells(row, childCols, normalStyle)) {
 			return sb.String()
 		}
+	}
+	return sb.String()
+}
+
+// renderDNSPane shows per-process DNS query/response history in the detail panel.
+// Records are displayed newest-first. Columns: TIME · RESOLVER · QUERY · TYPE · STATUS · RTT · ANSWER
+func (m Model) renderDNSPane() string {
+	panelH := m.graphPanelHeight()
+	if m.width <= 0 || panelH <= 0 || m.graphPID == 0 {
+		return strings.Repeat("\n", panelH)
+	}
+
+	name := m.graphName
+	if name == "" {
+		name = fmt.Sprintf("pid %d", m.graphPID)
+	}
+	titleText := fmt.Sprintf(" ▸ %s  (pid %d)   %d dns query(s)",
+		name, m.graphPID, len(m.graphDNS))
+
+	separator := dimStyle.Render(strings.Repeat("─", m.width))
+	titleLeft := graphTitleStyle.Render(titleText)
+	paneBar := m.renderPaneBar()
+	titleGap := m.width - lipgloss.Width(titleLeft) - lipgloss.Width(paneBar)
+	if titleGap < 1 {
+		titleGap = 1
+	}
+
+	var sb strings.Builder
+	sb.WriteString(separator + "\n")
+	sb.WriteString(titleLeft + strings.Repeat(" ", titleGap) + paneBar + "\n")
+
+	// Fixed column widths (sum leaves room for the answer column).
+	const (
+		wTime     = 9
+		wResolver = 18
+		wQuery    = 36
+		wType     = 6
+		wStatus   = 10
+		wRTT      = 7
+	)
+	wAnswer := m.width - wTime - wResolver - wQuery - wType - wStatus - wRTT - 2
+	if wAnswer < 10 {
+		wAnswer = 10
+	}
+
+	dnsHeaders := []string{"TIME", "RESOLVER", "QUERY", "TYPE", "STATUS", "RTT", "ANSWER"}
+	dnsCols := []int{wTime, wResolver, wQuery, wType, wStatus, wRTT, wAnswer}
+
+	sb.WriteString("\n")
+	sb.WriteString(renderCells(dnsHeaders, dnsCols, headerStyle))
+	sb.WriteString("\n")
+
+	if len(m.graphDNS) == 0 {
+		sb.WriteString(dimStyle.Render("  no dns queries observed"))
+		sb.WriteString(strings.Repeat("\n", panelH-5))
+		return sb.String()
+	}
+
+	// available rows: panelH - separator(1) - title(1) - blank(1) - header(1) - blank(1)
+	maxRows := panelH - 5
+	if maxRows < 1 {
+		maxRows = 1
+	}
+
+	// Show newest-first: take the last maxRows entries.
+	recs := m.graphDNS
+	if len(recs) > maxRows {
+		recs = recs[len(recs)-maxRows:]
+	}
+	for i := len(recs) - 1; i >= 0; i-- {
+		r := recs[i]
+
+		resolver := ""
+		if r.Resolver != nil {
+			resolver = r.Resolver.String()
+		}
+
+		var rttStr string
+		if r.RTT == 0 {
+			rttStr = dimStyle.Render("—")
+		} else {
+			ms := float64(r.RTT) / float64(time.Millisecond)
+			rttStr = formatRTT(ms)
+		}
+
+		statusStyle := dimStyle
+		switch r.Status {
+		case "NOERROR":
+			statusStyle = rateHighStyle
+		case "NXDOMAIN":
+			statusStyle = rateMidStyle
+		case "SERVFAIL", "REFUSED", "FORMERR":
+			statusStyle = errorStyle
+		}
+
+		answer := strings.Join(r.Answers, " ")
+		if answer == "" {
+			answer = "—"
+		}
+
+		cells := []string{
+			dimStyle.Render(r.Time.Format("15:04:05")),
+			dimStyle.Render(truncate(resolver, wResolver-1)),
+			truncate(r.Name, wQuery-1),
+			dimStyle.Render(r.QType),
+			statusStyle.Render(truncate(r.Status, wStatus-1)),
+			rttStr,
+			dimStyle.Render(truncate(answer, wAnswer-1)),
+		}
+		sb.WriteString(renderCells(cells, dnsCols, normalStyle))
+		sb.WriteString("\n")
 	}
 	return sb.String()
 }
