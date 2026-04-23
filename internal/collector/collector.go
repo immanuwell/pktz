@@ -160,9 +160,9 @@ func (c *Collector) Poll() {
 	c.poll()
 }
 
-// Run polls eBPF maps and /proc/net every 500 ms. Call in a goroutine.
+// Run polls eBPF maps and /proc/net every 300 ms. Call in a goroutine.
 func (c *Collector) Run() {
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(300 * time.Millisecond)
 	defer ticker.Stop()
 	for range ticker.C {
 		c.poll()

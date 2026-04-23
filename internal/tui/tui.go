@@ -243,7 +243,7 @@ func (m Model) Init() tea.Cmd {
 }
 
 func tickCmd() tea.Cmd {
-	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
+	return tea.Tick(300*time.Millisecond, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
 }
