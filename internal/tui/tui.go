@@ -380,13 +380,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "right", "l":
-		if m.activeView == viewProcessList && m.graphPID != 0 {
-			m.detailPane = (m.detailPane + 1) % numDetailPanes
+		if m.graphPID != 0 && (m.activeView == viewProcessList || m.activeView == viewConnDetail) {
+			m.shiftDetailPane(1)
 		}
 
 	case "left", "h":
-		if m.activeView == viewProcessList && m.graphPID != 0 {
-			m.detailPane = (m.detailPane - 1 + numDetailPanes) % numDetailPanes
+		if m.graphPID != 0 && (m.activeView == viewProcessList || m.activeView == viewConnDetail) {
+			m.shiftDetailPane(-1)
 		}
 
 	case " ":
@@ -411,6 +411,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cursor = 0
 			m.pinnedConn = connID{}
 			m.remoteColW = 30 // reset watermark for the new process
+			if m.detailPane == detailPaneConns {
+				m.detailPane = detailPaneGraphs
+			}
 		}
 
 	case "esc", "backspace":
@@ -480,6 +483,17 @@ func (m Model) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// shiftDetailPane advances the pane by delta (+1 or -1), skipping detailPaneConns
+// when in viewConnDetail (where the main table already shows connections).
+func (m *Model) shiftDetailPane(delta int) {
+	for i := 0; i < numDetailPanes; i++ {
+		m.detailPane = (m.detailPane + delta + numDetailPanes) % numDetailPanes
+		if m.activeView != viewConnDetail || m.detailPane != detailPaneConns {
+			return
+		}
+	}
+}
+
 // handleDetailPaneKey handles keyboard input when the conns pane has focus.
 func (m Model) handleDetailPaneKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
@@ -497,9 +511,9 @@ func (m Model) handleDetailPaneKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.detailFocused = false
 	case "left", "h", "right", "l":
 		if msg.String() == "right" || msg.String() == "l" {
-			m.detailPane = (m.detailPane + 1) % numDetailPanes
+			m.shiftDetailPane(1)
 		} else {
-			m.detailPane = (m.detailPane - 1 + numDetailPanes) % numDetailPanes
+			m.shiftDetailPane(-1)
 		}
 		if m.detailPane != detailPaneConns {
 			m.detailFocused = false
@@ -1052,7 +1066,7 @@ func (m Model) renderFooter() string {
 				geoHint = "  g:show geo"
 			}
 		}
-		keys = helpStyle.Render(fmt.Sprintf("↑↓:nav  esc:back  %s  %s%s  %s  q:quit", resolveHint, ipv6Hint, geoHint, mouseHint))
+		keys = helpStyle.Render(fmt.Sprintf("↑↓:nav  esc:back  h/l:pane  %s  %s%s  %s  q:quit", resolveHint, ipv6Hint, geoHint, mouseHint))
 	}
 
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(keys)
@@ -1141,14 +1155,26 @@ func (m Model) renderDetailPanel() string {
 }
 
 // renderPaneBar renders the pane switcher indicator shown in the panel title.
+// In viewConnDetail the conns pane is omitted (main table already shows it).
 func (m Model) renderPaneBar() string {
-	names := []string{"graphs", "conns", "process"}
-	parts := make([]string, len(names))
-	for i, name := range names {
-		if i == m.detailPane {
-			parts[i] = graphTitleStyle.Render("[" + name + "]")
+	type paneEntry struct {
+		idx  int
+		name string
+	}
+	all := []paneEntry{
+		{detailPaneGraphs, "graphs"},
+		{detailPaneConns, "conns"},
+		{detailPaneProcess, "process"},
+	}
+	var parts []string
+	for _, e := range all {
+		if m.activeView == viewConnDetail && e.idx == detailPaneConns {
+			continue
+		}
+		if e.idx == m.detailPane {
+			parts = append(parts, graphTitleStyle.Render("["+e.name+"]"))
 		} else {
-			parts[i] = dimStyle.Render(name)
+			parts = append(parts, dimStyle.Render(e.name))
 		}
 	}
 	return dimStyle.Render("h/l ") + strings.Join(parts, dimStyle.Render(" · ")) + " "
