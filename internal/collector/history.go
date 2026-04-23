@@ -7,4 +7,5 @@ const maxHistoryLen = 600
 type HistoryEntry struct {
 	RxRate float64 // bytes/sec at this sample
 	TxRate float64
+	PPS    float64 // combined packets/sec at this sample
 }

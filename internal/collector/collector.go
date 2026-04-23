@@ -361,7 +361,7 @@ func (c *Collector) poll() {
 	// Append one history entry per active process.
 	for pid, p := range newProcs {
 		h := c.history[pid]
-		h = append(h, HistoryEntry{RxRate: p.RxRate, TxRate: p.TxRate})
+		h = append(h, HistoryEntry{RxRate: p.RxRate, TxRate: p.TxRate, PPS: p.RxPPS + p.TxPPS})
 		if len(h) > maxHistoryLen {
 			h = h[len(h)-maxHistoryLen:]
 		}

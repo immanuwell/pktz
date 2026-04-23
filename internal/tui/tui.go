@@ -577,12 +577,12 @@ func (m *Model) updateRemoteColW() {
 
 // graphPanelHeight returns how many terminal rows the graph panel should occupy.
 func (m Model) graphPanelHeight() int {
-	h := m.height * 30 / 100
+	h := m.height * 35 / 100
 	if h < 8 {
 		h = 8
 	}
-	if h > 14 {
-		h = 14
+	if h > 18 {
+		h = 18
 	}
 	return h
 }
@@ -1055,16 +1055,19 @@ func (m Model) renderGraphPanel() string {
 		return strings.Repeat("\n", panelH)
 	}
 
-	chartH := (panelH - 6) / 2
+	// 3 charts: separator(1) + title(1) + 3×(label(1)+chart) + time-axis(1) = 3*chart + 5
+	// Minimum chart height 1; distribute remaining rows evenly.
+	chartH := (panelH - 5) / 3
 	if chartH < 1 {
 		chartH = 1
 	}
 
-	var currentRX, currentTX float64
+	var currentRX, currentTX, currentPPS float64
 	if len(m.history) > 0 {
 		last := m.history[len(m.history)-1]
 		currentRX = last.RxRate
 		currentTX = last.TxRate
+		currentPPS = last.PPS
 	}
 
 	name := m.graphName
@@ -1072,8 +1075,8 @@ func (m Model) renderGraphPanel() string {
 		name = fmt.Sprintf("pid %d", m.graphPID)
 	}
 
-	titleText := fmt.Sprintf(" ▸ %s  (pid %d)   RX %s/s   TX %s/s   [5 min]",
-		name, m.graphPID, formatBytes(currentRX), formatBytes(currentTX))
+	titleText := fmt.Sprintf(" ▸ %s  (pid %d)   RX %s/s   TX %s/s   PPS %s   [5 min]",
+		name, m.graphPID, formatBytes(currentRX), formatBytes(currentTX), formatPPS(currentPPS))
 
 	separator := dimStyle.Render(strings.Repeat("─", m.width))
 	titleLeft := graphTitleStyle.Render(titleText)
@@ -1089,22 +1092,25 @@ func (m Model) renderGraphPanel() string {
 
 	if len(m.history) == 0 {
 		sb.WriteString(dimStyle.Render("  collecting data…"))
-		// Pad to the same height as the normal graph path so the table row budget stays stable.
 		sb.WriteString(strings.Repeat("\n", panelH-3))
 		return sb.String()
 	}
 
 	rxData := make([]float64, len(m.history))
 	txData := make([]float64, len(m.history))
+	ppsData := make([]float64, len(m.history))
 	for i, h := range m.history {
 		rxData[i] = h.RxRate
 		txData[i] = h.TxRate
+		ppsData[i] = h.PPS
 	}
 
 	sb.WriteString(graphRXStyle.Render(" RX") + "\n")
 	sb.WriteString(renderGraph(rxData, m.width, chartH, "#34D399") + "\n")
 	sb.WriteString(graphTXStyle.Render(" TX") + "\n")
 	sb.WriteString(renderGraph(txData, m.width, chartH, "#FCD34D") + "\n")
+	sb.WriteString(dimStyle.Render(" PPS") + "\n")
+	sb.WriteString(renderGraph(ppsData, m.width, chartH, "#A78BFA") + "\n")
 	sb.WriteString(renderTimeAxis(m.width, len(m.history), time.Now()))
 	return sb.String()
 }
