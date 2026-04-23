@@ -27,6 +27,13 @@ const (
 	viewContainerList
 )
 
+// detailPane selects which panel is shown in the bottom graph area.
+const (
+	detailPaneGraphs = 0
+	detailPaneConns  = 1
+	numDetailPanes   = 2
+)
+
 // sortKey controls the ordering of the process list.
 type sortKey int
 
@@ -116,10 +123,11 @@ type tickMsg time.Time
 
 // statsMsg carries freshly fetched data from the collector.
 type statsMsg struct {
-	procs   []collector.ProcessInfo
-	conns   []collector.ConnInfo
-	history []collector.HistoryEntry
-	ifaces  []collector.IfaceInfo
+	procs      []collector.ProcessInfo
+	conns      []collector.ConnInfo
+	graphConns []collector.ConnInfo
+	history    []collector.HistoryEntry
+	ifaces     []collector.IfaceInfo
 }
 
 // connID is a comparable 5-tuple that uniquely identifies a connection row.
@@ -167,6 +175,8 @@ type Model struct {
 	graphPID     uint32
 	graphName    string
 	history      []collector.HistoryEntry
+	graphConns   []collector.ConnInfo // connections for graphPID; used by conns pane
+	detailPane   int                  // 0=graphs, 1=connections
 	filterInput  textinput.Model
 	filtering    bool
 	appFilter    string // permanent filter set by --app flag; empty = disabled
@@ -249,6 +259,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.conns = msg.conns
 		sortConns(m.conns)
 		m.restorePinnedConn()
+		m.graphConns = msg.graphConns
 		m.history = msg.history
 		m.updateRemoteColW()
 		if n := listLen(m); m.cursor >= n && n > 0 {
@@ -331,6 +342,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cursor++
 			m.syncGraphPID()
 			m.pinCursor()
+		}
+
+	case "right", "l":
+		if m.activeView == viewProcessList && m.graphPID != 0 {
+			m.detailPane = (m.detailPane + 1) % numDetailPanes
+		}
+
+	case "left", "h":
+		if m.activeView == viewProcessList && m.graphPID != 0 {
+			m.detailPane = (m.detailPane - 1 + numDetailPanes) % numDetailPanes
 		}
 
 	case " ":
@@ -532,11 +553,19 @@ func fetchStats(c *collector.Collector, pid uint32, v view, graphPID uint32, ano
 				}
 			}
 		}
+		var graphConns []collector.ConnInfo
+		if graphPID != 0 {
+			graphConns = c.Connections(graphPID)
+			if anon != nil {
+				graphConns = anon.Conns(graphConns)
+			}
+		}
 		return statsMsg{
-			procs:   procs,
-			conns:   conns,
-			history: c.History(graphPID),
-			ifaces:  c.Interfaces(),
+			procs:      procs,
+			conns:      conns,
+			graphConns: graphConns,
+			history:    c.History(graphPID),
+			ifaces:     c.Interfaces(),
 		}
 	}
 }
@@ -552,7 +581,7 @@ func (m Model) View() string {
 		m.renderHeader(),
 		m.renderTable(),
 		m.renderFooter(),
-		m.renderGraphPanel(),
+		m.renderDetailPanel(),
 	)
 }
 
@@ -930,7 +959,11 @@ func (m Model) renderFooter() string {
 				break
 			}
 		}
-		keys = helpStyle.Render(fmt.Sprintf("↑↓:nav  enter:detail  click:sort  /:filter  s:sort%s  c:containers  %s  q:quit", groupHint, mouseHint))
+		paneHint := ""
+		if m.graphPID != 0 {
+			paneHint = "  h/l:pane"
+		}
+		keys = helpStyle.Render(fmt.Sprintf("↑↓:nav  enter:detail  click:sort  /:filter  s:sort%s%s  c:containers  %s  q:quit", groupHint, paneHint, mouseHint))
 	default:
 		geoHint := ""
 		if m.geo != nil {
@@ -977,11 +1010,16 @@ func (m Model) renderGraphPanel() string {
 		name, m.graphPID, formatBytes(currentRX), formatBytes(currentTX))
 
 	separator := dimStyle.Render(strings.Repeat("─", m.width))
-	title := graphTitleStyle.Render(titleText)
+	titleLeft := graphTitleStyle.Render(titleText)
+	paneBar := m.renderPaneBar()
+	titleGap := m.width - lipgloss.Width(titleLeft) - lipgloss.Width(paneBar)
+	if titleGap < 1 {
+		titleGap = 1
+	}
 
 	var sb strings.Builder
 	sb.WriteString(separator + "\n")
-	sb.WriteString(title + "\n")
+	sb.WriteString(titleLeft + strings.Repeat(" ", titleGap) + paneBar + "\n")
 
 	if len(m.history) == 0 {
 		sb.WriteString(dimStyle.Render("  collecting data…"))
@@ -1002,6 +1040,115 @@ func (m Model) renderGraphPanel() string {
 	sb.WriteString(graphTXStyle.Render(" TX") + "\n")
 	sb.WriteString(renderGraph(txData, m.width, chartH, "#FCD34D") + "\n")
 	sb.WriteString(renderTimeAxis(m.width, len(m.history), time.Now()))
+	return sb.String()
+}
+
+// renderDetailPanel dispatches to the active detail pane.
+func (m Model) renderDetailPanel() string {
+	if m.detailPane == detailPaneConns {
+		return m.renderConnPane()
+	}
+	return m.renderGraphPanel()
+}
+
+// renderPaneBar renders the pane switcher indicator shown in the panel title.
+func (m Model) renderPaneBar() string {
+	names := []string{"graphs", "conns"}
+	parts := make([]string, len(names))
+	for i, name := range names {
+		if i == m.detailPane {
+			parts[i] = graphTitleStyle.Render("[" + name + "]")
+		} else {
+			parts[i] = dimStyle.Render(name)
+		}
+	}
+	return dimStyle.Render("h/l ") + strings.Join(parts, dimStyle.Render(" · ")) + " "
+}
+
+// renderConnPane shows per-connection traffic for the focused process in the detail panel area,
+// in a compact tcpdump-like format.
+func (m Model) renderConnPane() string {
+	panelH := m.graphPanelHeight()
+	if m.width <= 0 || panelH <= 0 || m.graphPID == 0 {
+		return strings.Repeat("\n", panelH)
+	}
+
+	name := m.graphName
+	if name == "" {
+		name = fmt.Sprintf("pid %d", m.graphPID)
+	}
+	titleText := fmt.Sprintf(" ▸ %s  (pid %d)   %d connection(s)",
+		name, m.graphPID, len(m.graphConns))
+
+	separator := dimStyle.Render(strings.Repeat("─", m.width))
+	titleLeft := graphTitleStyle.Render(titleText)
+	paneBar := m.renderPaneBar()
+	titleGap := m.width - lipgloss.Width(titleLeft) - lipgloss.Width(paneBar)
+	if titleGap < 1 {
+		titleGap = 1
+	}
+
+	var sb strings.Builder
+	sb.WriteString(separator + "\n")
+	sb.WriteString(titleLeft + strings.Repeat(" ", titleGap) + paneBar + "\n")
+
+	if len(m.graphConns) == 0 {
+		sb.WriteString(dimStyle.Render("  no connections"))
+		sb.WriteString(strings.Repeat("\n", panelH-3))
+		return sb.String()
+	}
+
+	// Column layout: DIR(2) PROTO(5) LOCAL(22) arrow(3) REMOTE(dynamic) STATE(13) RX(9) TX(9)
+	remoteW := m.width - 2 - 5 - 22 - 3 - 13 - 9 - 9 - 4 // 4 = spacing between last cols
+	if remoteW < 18 {
+		remoteW = 18
+	}
+	cols := []int{2, 5, 22, 3, remoteW, 13, 9, 9}
+	headers := []string{"", "PROTO", "LOCAL", "→", "REMOTE", "STATE", "RX/s", "TX/s"}
+
+	sb.WriteString("\n")
+	sb.WriteString(renderCells(headers, cols, headerStyle))
+	sb.WriteString("\n")
+
+	// available rows: panelH - separator(1) - title(1) - blank(1) - header(1) - blank(1)
+	maxRows := panelH - 5
+	if maxRows < 1 {
+		maxRows = 1
+	}
+	conns := m.graphConns
+	if len(conns) > maxRows {
+		conns = conns[:maxRows]
+	}
+
+	for _, c := range conns {
+		protoStyle := protoTCPStyle
+		if c.Proto == "UDP" {
+			protoStyle = protoUDPStyle
+		}
+		isInbound := c.State == "LISTEN" || c.SrcPort < 1024
+		dir := dimStyle.Render("▲")
+		if isInbound {
+			dir = dimStyle.Render("▼")
+		}
+		rxS := colourRate(c.RxRate).Render(formatBytes(c.RxRate) + "/s")
+		txS := colourRate(c.TxRate).Render(formatBytes(c.TxRate) + "/s")
+		state := truncate(c.State, cols[5]-1)
+		if state == "" {
+			state = "—"
+		}
+		row := []string{
+			dir,
+			protoStyle.Render(c.Proto),
+			formatAddr(c.SrcAddr, c.SrcPort, false, m.res, m.resolveNames, m.compactIPv6, m.anon),
+			dimStyle.Render("→"),
+			formatAddr(c.DstAddr, c.DstPort, true, m.res, m.resolveNames, m.compactIPv6, m.anon),
+			dimStyle.Render(state),
+			rxS,
+			txS,
+		}
+		sb.WriteString(renderCells(row, cols, normalStyle))
+		sb.WriteString("\n")
+	}
 	return sb.String()
 }
 
