@@ -32,7 +32,8 @@ const (
 	detailPaneGraphs  = 0
 	detailPaneConns   = 1
 	detailPaneProcess = 2
-	numDetailPanes    = 3
+	detailPaneTcpdump = 3
+	numDetailPanes    = 4
 )
 
 // sortKey controls the ordering of the process list.
@@ -181,9 +182,10 @@ type Model struct {
 	graphConns     []collector.ConnInfo // connections for graphPID; used by conns pane
 	graphCmdline   []string             // argv for graphPID; used by process pane
 	graphCwd       string               // working directory for graphPID
-	detailPane     int                  // 0=graphs, 1=connections, 2=process
+	detailPane     int                  // 0=graphs, 1=connections, 2=process, 3=tcpdump
 	detailFocused  bool                 // true when keyboard focus is in the detail pane
 	connPaneCursor int                  // scroll cursor within the conns pane
+	tcpdump        *tcpdumpState        // non-nil while [tcpdump] pane is open
 	filterInput  textinput.Model
 	filtering    bool
 	appFilter    string // permanent filter set by --app flag; empty = disabled
@@ -285,18 +287,45 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if n := listLen(m); m.cursor >= n && n > 0 {
 			m.cursor = n - 1
 		}
+		prevGraphPID := m.graphPID
 		m.syncGraphPID()
+
+		// Stop tcpdump when the tracked process changes.
+		if prevGraphPID != m.graphPID && m.tcpdump != nil {
+			m.tcpdump.stop()
+			m.tcpdump = nil
+		}
+
+		// Restart tcpdump when its pane is active and ports have changed.
+		if m.detailPane == detailPaneTcpdump {
+			var tcpCmd tea.Cmd
+			m, tcpCmd = m.ensureTcpdumpRunning()
+			return m, tcpCmd
+		}
+		return m, nil
 
 	case tea.MouseMsg:
 		if m.mouseEnabled && msg.Action == tea.MouseActionRelease && msg.Button == tea.MouseButtonLeft {
 			return m.handleMouseClick(msg.X, msg.Y)
 		}
 
+	case tcpdumpLineMsg:
+		if m.tcpdump != nil && m.tcpdump.stdout == msg.scanner {
+			m.tcpdump.appendLine(msg.line)
+			return m, readTcpdumpLine(msg.scanner)
+		}
+
+	case tcpdumpStopMsg:
+		if m.tcpdump != nil && m.tcpdump.stdout == msg.scanner {
+			m.tcpdump.cmd = nil
+			m.tcpdump.stdout = nil
+		}
+
 	case tea.KeyMsg:
 		if m.filtering {
 			return m.handleFilterKey(msg)
 		}
-		if m.detailFocused && m.detailPane == detailPaneConns {
+		if m.detailFocused && (m.detailPane == detailPaneConns || m.detailPane == detailPaneTcpdump) {
 			return m.handleDetailPaneKey(msg)
 		}
 		return m.handleKey(msg)
@@ -315,17 +344,16 @@ func (m Model) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 	if y == paneTitleY && m.graphPID != 0 &&
 		(m.activeView == viewProcessList || m.activeView == viewConnDetail) {
 		if clicked, ok := m.paneBarHitTest(x); ok {
+			prevPane := m.detailPane
 			m.detailPane = clicked
-			if clicked != detailPaneConns {
-				m.detailFocused = false
-			}
-			return m, nil
+			return m.handlePaneChange(prevPane)
 		}
 	}
 
-	// Click inside the detail panel area (below title row).
-	if y >= panelStartY && m.activeView == viewProcessList {
-		if m.detailPane == detailPaneConns && m.graphPID != 0 {
+	// Click inside the detail panel area (below title row) — focus scrollable panes.
+	if y >= panelStartY && m.graphPID != 0 &&
+		(m.activeView == viewProcessList || m.activeView == viewConnDetail) {
+		if m.detailPane == detailPaneConns || m.detailPane == detailPaneTcpdump {
 			m.detailFocused = true
 		}
 		return m, nil
@@ -364,6 +392,7 @@ func (m Model) paneBarHitTest(x int) (int, bool) {
 		{detailPaneGraphs, "graphs"},
 		{detailPaneConns, "conns"},
 		{detailPaneProcess, "process"},
+		{detailPaneTcpdump, "tcpdump"},
 	}
 
 	// Bar is right-aligned; compute its starting X from its plain-text width.
@@ -434,12 +463,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "right", "l":
 		if m.graphPID != 0 && (m.activeView == viewProcessList || m.activeView == viewConnDetail) {
+			prevPane := m.detailPane
 			m.shiftDetailPane(1)
+			return m.handlePaneChange(prevPane)
 		}
 
 	case "left", "h":
 		if m.graphPID != 0 && (m.activeView == viewProcessList || m.activeView == viewConnDetail) {
+			prevPane := m.detailPane
 			m.shiftDetailPane(-1)
+			return m.handlePaneChange(prevPane)
 		}
 
 	case " ":
@@ -547,30 +580,48 @@ func (m *Model) shiftDetailPane(delta int) {
 	}
 }
 
-// handleDetailPaneKey handles keyboard input when the conns pane has focus.
+// handleDetailPaneKey handles keyboard input when a scrollable detail pane has focus.
 func (m Model) handleDetailPaneKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "q":
 		return m, tea.Quit
+
 	case "up", "k":
-		if m.connPaneCursor > 0 {
+		if m.detailPane == detailPaneTcpdump {
+			if m.tcpdump != nil {
+				m.tcpdump.scroll++
+				if max := len(m.tcpdump.lines); m.tcpdump.scroll > max {
+					m.tcpdump.scroll = max
+				}
+			}
+		} else if m.connPaneCursor > 0 {
 			m.connPaneCursor--
 		}
+
 	case "down", "j":
-		if m.connPaneCursor < len(m.graphConns)-1 {
+		if m.detailPane == detailPaneTcpdump {
+			if m.tcpdump != nil && m.tcpdump.scroll > 0 {
+				m.tcpdump.scroll--
+			}
+		} else if m.connPaneCursor < len(m.graphConns)-1 {
 			m.connPaneCursor++
 		}
+
 	case "esc":
-		m.detailFocused = false
+		if m.detailPane == detailPaneTcpdump && m.tcpdump != nil && m.tcpdump.scroll > 0 {
+			m.tcpdump.scroll = 0 // unpin — scroll back to live bottom
+		} else {
+			m.detailFocused = false
+		}
+
 	case "left", "h", "right", "l":
+		prevPane := m.detailPane
 		if msg.String() == "right" || msg.String() == "l" {
 			m.shiftDetailPane(1)
 		} else {
 			m.shiftDetailPane(-1)
 		}
-		if m.detailPane != detailPaneConns {
-			m.detailFocused = false
-		}
+		return m.handlePaneChange(prevPane)
 	}
 	return m, nil
 }
@@ -599,6 +650,11 @@ func (m *Model) syncGraphPID() {
 		// Process changed — reset the conns-pane scroll and focus.
 		m.connPaneCursor = 0
 		m.detailFocused = false
+		// Stop tcpdump; it will be restarted by the next statsMsg handler.
+		if m.tcpdump != nil {
+			m.tcpdump.stop()
+			m.tcpdump = nil
+		}
 	}
 	m.graphPID = newPID
 	m.graphName = m.procRows[cur].proc.Comm
@@ -1202,6 +1258,8 @@ func (m Model) renderDetailPanel() string {
 		return m.renderConnPane()
 	case detailPaneProcess:
 		return m.renderProcessPane()
+	case detailPaneTcpdump:
+		return m.renderTcpdumpPane()
 	default:
 		return m.renderGraphPanel()
 	}
@@ -1218,6 +1276,7 @@ func (m Model) renderPaneBar() string {
 		{detailPaneGraphs, "graphs"},
 		{detailPaneConns, "conns"},
 		{detailPaneProcess, "process"},
+		{detailPaneTcpdump, "tcpdump"},
 	}
 	var parts []string
 	for _, e := range all {
