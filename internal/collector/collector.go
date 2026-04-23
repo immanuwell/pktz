@@ -427,6 +427,30 @@ func (c *Collector) resolveContainerName(containerID string) string {
 	return name
 }
 
+// CmdlineOf reads the full argv of a process from /proc/<pid>/cmdline.
+// Returns nil if the process has exited or is a kernel thread.
+func CmdlineOf(pid uint32) []string {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+	// Entries are NUL-separated; strip trailing NUL before splitting.
+	if data[len(data)-1] == 0 {
+		data = data[:len(data)-1]
+	}
+	parts := strings.Split(string(data), "\x00")
+	return parts
+}
+
+// CwdOf resolves the working directory of a process via /proc/<pid>/cwd.
+func CwdOf(pid uint32) string {
+	target, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
+	if err != nil {
+		return ""
+	}
+	return target
+}
+
 func commFromProc(pid uint32) string {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
 	if err != nil {

@@ -29,9 +29,10 @@ const (
 
 // detailPane selects which panel is shown in the bottom graph area.
 const (
-	detailPaneGraphs = 0
-	detailPaneConns  = 1
-	numDetailPanes   = 2
+	detailPaneGraphs  = 0
+	detailPaneConns   = 1
+	detailPaneProcess = 2
+	numDetailPanes    = 3
 )
 
 // sortKey controls the ordering of the process list.
@@ -123,11 +124,13 @@ type tickMsg time.Time
 
 // statsMsg carries freshly fetched data from the collector.
 type statsMsg struct {
-	procs      []collector.ProcessInfo
-	conns      []collector.ConnInfo
-	graphConns []collector.ConnInfo
-	history    []collector.HistoryEntry
-	ifaces     []collector.IfaceInfo
+	procs        []collector.ProcessInfo
+	conns        []collector.ConnInfo
+	graphConns   []collector.ConnInfo
+	graphCmdline []string
+	graphCwd     string
+	history      []collector.HistoryEntry
+	ifaces       []collector.IfaceInfo
 }
 
 // connID is a comparable 5-tuple that uniquely identifies a connection row.
@@ -176,7 +179,9 @@ type Model struct {
 	graphName      string
 	history        []collector.HistoryEntry
 	graphConns     []collector.ConnInfo // connections for graphPID; used by conns pane
-	detailPane     int                  // 0=graphs, 1=connections
+	graphCmdline   []string             // argv for graphPID; used by process pane
+	graphCwd       string               // working directory for graphPID
+	detailPane     int                  // 0=graphs, 1=connections, 2=process
 	detailFocused  bool                 // true when keyboard focus is in the detail pane
 	connPaneCursor int                  // scroll cursor within the conns pane
 	filterInput  textinput.Model
@@ -266,6 +271,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		sortConns(m.conns)
 		m.restorePinnedConn()
 		m.graphConns = msg.graphConns
+		m.graphCmdline = msg.graphCmdline
+		m.graphCwd = msg.graphCwd
 		if n := len(m.graphConns); m.connPaneCursor >= n {
 			if n > 0 {
 				m.connPaneCursor = n - 1
@@ -616,18 +623,24 @@ func fetchStats(c *collector.Collector, pid uint32, v view, graphPID uint32, ano
 			}
 		}
 		var graphConns []collector.ConnInfo
+		var graphCmdline []string
+		var graphCwd string
 		if graphPID != 0 {
 			graphConns = c.Connections(graphPID)
 			if anon != nil {
 				graphConns = anon.Conns(graphConns)
 			}
+			graphCmdline = collector.CmdlineOf(graphPID)
+			graphCwd = collector.CwdOf(graphPID)
 		}
 		return statsMsg{
-			procs:      procs,
-			conns:      conns,
-			graphConns: graphConns,
-			history:    c.History(graphPID),
-			ifaces:     c.Interfaces(),
+			procs:        procs,
+			conns:        conns,
+			graphConns:   graphConns,
+			graphCmdline: graphCmdline,
+			graphCwd:     graphCwd,
+			history:      c.History(graphPID),
+			ifaces:       c.Interfaces(),
 		}
 	}
 }
@@ -1117,15 +1130,19 @@ func (m Model) renderGraphPanel() string {
 
 // renderDetailPanel dispatches to the active detail pane.
 func (m Model) renderDetailPanel() string {
-	if m.detailPane == detailPaneConns {
+	switch m.detailPane {
+	case detailPaneConns:
 		return m.renderConnPane()
+	case detailPaneProcess:
+		return m.renderProcessPane()
+	default:
+		return m.renderGraphPanel()
 	}
-	return m.renderGraphPanel()
 }
 
 // renderPaneBar renders the pane switcher indicator shown in the panel title.
 func (m Model) renderPaneBar() string {
-	names := []string{"graphs", "conns"}
+	names := []string{"graphs", "conns", "process"}
 	parts := make([]string, len(names))
 	for i, name := range names {
 		if i == m.detailPane {
@@ -1226,6 +1243,112 @@ func (m Model) renderConnPane() string {
 			sb.WriteString(dimStyle.Render(dir) + renderCells(row, cols, normalStyle))
 		}
 		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// renderProcessPane shows the full cmdline, working directory, and child processes
+// for the currently focused process.
+func (m Model) renderProcessPane() string {
+	panelH := m.graphPanelHeight()
+	if m.width <= 0 || panelH <= 0 || m.graphPID == 0 {
+		return strings.Repeat("\n", panelH)
+	}
+
+	name := m.graphName
+	if name == "" {
+		name = fmt.Sprintf("pid %d", m.graphPID)
+	}
+
+	separator := dimStyle.Render(strings.Repeat("─", m.width))
+	titleLeft := graphTitleStyle.Render(fmt.Sprintf(" ▸ %s  (pid %d)", name, m.graphPID))
+	paneBar := m.renderPaneBar()
+	titleGap := m.width - lipgloss.Width(titleLeft) - lipgloss.Width(paneBar)
+	if titleGap < 1 {
+		titleGap = 1
+	}
+
+	var sb strings.Builder
+	sb.WriteString(separator + "\n")
+	sb.WriteString(titleLeft + strings.Repeat(" ", titleGap) + paneBar + "\n")
+
+	// Budget: separator(1) + title(1) already written; remaining = panelH - 2.
+	remaining := panelH - 2
+	writeLine := func(s string) bool {
+		if remaining <= 0 {
+			return false
+		}
+		sb.WriteString(s + "\n")
+		remaining--
+		return true
+	}
+
+	// ── cmdline ──────────────────────────────────────────────────────────────
+	if !writeLine("") {
+		return sb.String()
+	}
+	if !writeLine(headerStyle.Render(" cmdline")) {
+		return sb.String()
+	}
+	if len(m.graphCmdline) == 0 {
+		writeLine(dimStyle.Render("   (not available)"))
+	} else {
+		// First token is the executable; rest are arguments.
+		exe := m.graphCmdline[0]
+		writeLine("   " + graphTitleStyle.Render(exe))
+		for _, arg := range m.graphCmdline[1:] {
+			if !writeLine(dimStyle.Render("   " + arg)) {
+				return sb.String()
+			}
+		}
+	}
+
+	// ── cwd ──────────────────────────────────────────────────────────────────
+	if m.graphCwd != "" {
+		if !writeLine("") {
+			return sb.String()
+		}
+		if !writeLine(headerStyle.Render(" cwd") + "  " + dimStyle.Render(m.graphCwd)) {
+			return sb.String()
+		}
+	}
+
+	// ── children ─────────────────────────────────────────────────────────────
+	var children []collector.ProcessInfo
+	for _, p := range m.procs {
+		if p.PPID == m.graphPID && p.PID != m.graphPID {
+			children = append(children, p)
+		}
+	}
+	if len(children) == 0 {
+		return sb.String()
+	}
+
+	if !writeLine("") {
+		return sb.String()
+	}
+	if !writeLine(headerStyle.Render(fmt.Sprintf(" children  (%d)", len(children)))) {
+		return sb.String()
+	}
+
+	childCols := []int{9, 20, 11, 11, 6}
+	childHeaders := []string{"PID", "PROCESS", "RX/s", "TX/s", "CONN"}
+	if !writeLine("   " + renderCells(childHeaders, childCols, dimStyle)) {
+		return sb.String()
+	}
+	for _, c := range children {
+		rxS := colourRate(c.RxRate).Render(formatBytes(c.RxRate) + "/s")
+		txS := colourRate(c.TxRate).Render(formatBytes(c.TxRate) + "/s")
+		row := []string{
+			fmt.Sprintf("%d", c.PID),
+			truncate(c.Comm, childCols[1]-1),
+			rxS,
+			txS,
+			fmt.Sprintf("%d", c.ConnCount),
+		}
+		if !writeLine("   " + renderCells(row, childCols, normalStyle)) {
+			return sb.String()
+		}
 	}
 	return sb.String()
 }
