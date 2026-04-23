@@ -1088,7 +1088,7 @@ func (m Model) renderGraphPanel() string {
 		name = fmt.Sprintf("pid %d", m.graphPID)
 	}
 
-	titleText := fmt.Sprintf(" ▸ %s  (pid %d)   RX %s/s   TX %s/s   PPS %s   [5 min]",
+	titleText := fmt.Sprintf(" ▸ %s  (pid %d)   ▼ RX %s/s   ▲ TX %s/s   PPS %s   [5 min]",
 		name, m.graphPID, formatBytes(currentRX), formatBytes(currentTX), formatPPS(currentPPS))
 
 	separator := dimStyle.Render(strings.Repeat("─", m.width))
@@ -1118,9 +1118,9 @@ func (m Model) renderGraphPanel() string {
 		ppsData[i] = h.PPS
 	}
 
-	sb.WriteString(graphRXStyle.Render(" RX") + "\n")
+	sb.WriteString(graphRXStyle.Render(" ▼ RX") + "\n")
 	sb.WriteString(renderGraph(rxData, m.width, chartH, "#34D399") + "\n")
-	sb.WriteString(graphTXStyle.Render(" TX") + "\n")
+	sb.WriteString(graphTXStyle.Render(" ▲ TX") + "\n")
 	sb.WriteString(renderGraph(txData, m.width, chartH, "#FCD34D") + "\n")
 	sb.WriteString(dimStyle.Render(" PPS") + "\n")
 	sb.WriteString(renderGraph(ppsData, m.width, chartH, "#A78BFA") + "\n")
