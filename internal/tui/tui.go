@@ -309,8 +309,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 	panelStartY := m.height - m.graphPanelHeight()
+	paneTitleY := panelStartY + 1 // separator is row 0; title+pane bar is row 1
 
-	// Click inside the detail panel area.
+	// Click on the pane bar tab row — switch panes.
+	if y == paneTitleY && m.graphPID != 0 &&
+		(m.activeView == viewProcessList || m.activeView == viewConnDetail) {
+		if clicked, ok := m.paneBarHitTest(x); ok {
+			m.detailPane = clicked
+			if clicked != detailPaneConns {
+				m.detailFocused = false
+			}
+			return m, nil
+		}
+	}
+
+	// Click inside the detail panel area (below title row).
 	if y >= panelStartY && m.activeView == viewProcessList {
 		if m.detailPane == detailPaneConns && m.graphPID != 0 {
 			m.detailFocused = true
@@ -338,6 +351,46 @@ func (m Model) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 		pos += w
 	}
 	return m, nil
+}
+
+// paneBarHitTest returns the pane index whose label contains column x, and true.
+// Returns 0, false if x does not land on any label.
+func (m Model) paneBarHitTest(x int) (int, bool) {
+	type entry struct {
+		idx  int
+		name string
+	}
+	all := []entry{
+		{detailPaneGraphs, "graphs"},
+		{detailPaneConns, "conns"},
+		{detailPaneProcess, "process"},
+	}
+
+	// Bar is right-aligned; compute its starting X from its plain-text width.
+	barX := m.width - lipgloss.Width(m.renderPaneBar())
+	cx := barX + 4 // skip "h/l "
+
+	first := true
+	for _, e := range all {
+		if m.activeView == viewConnDetail && e.idx == detailPaneConns {
+			continue
+		}
+		if !first {
+			cx += 3 // " · " separator
+		}
+		first = false
+
+		// Active label has "[" + name + "]", inactive just name.
+		labelW := len(e.name)
+		if e.idx == m.detailPane {
+			labelW += 2
+		}
+		if x >= cx && x < cx+labelW {
+			return e.idx, true
+		}
+		cx += labelW
+	}
+	return 0, false
 }
 
 // effectiveProcCols returns the column widths with the dynamic PID column applied.
