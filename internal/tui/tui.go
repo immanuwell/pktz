@@ -172,11 +172,13 @@ type Model struct {
 	geo          *geoip.DB
 	showGeo      bool // toggled with 'g'; true when DB is available
 	anon         *demo.Anonymizer
-	graphPID     uint32
-	graphName    string
-	history      []collector.HistoryEntry
-	graphConns   []collector.ConnInfo // connections for graphPID; used by conns pane
-	detailPane   int                  // 0=graphs, 1=connections
+	graphPID       uint32
+	graphName      string
+	history        []collector.HistoryEntry
+	graphConns     []collector.ConnInfo // connections for graphPID; used by conns pane
+	detailPane     int                  // 0=graphs, 1=connections
+	detailFocused  bool                 // true when keyboard focus is in the detail pane
+	connPaneCursor int                  // scroll cursor within the conns pane
 	filterInput  textinput.Model
 	filtering    bool
 	appFilter    string // permanent filter set by --app flag; empty = disabled
@@ -260,6 +262,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		sortConns(m.conns)
 		m.restorePinnedConn()
 		m.graphConns = msg.graphConns
+		if n := len(m.graphConns); m.connPaneCursor >= n {
+			if n > 0 {
+				m.connPaneCursor = n - 1
+			} else {
+				m.connPaneCursor = 0
+			}
+		}
 		m.history = msg.history
 		m.updateRemoteColW()
 		if n := listLen(m); m.cursor >= n && n > 0 {
@@ -276,6 +285,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.filtering {
 			return m.handleFilterKey(msg)
 		}
+		if m.detailFocused && m.detailPane == detailPaneConns {
+			return m.handleDetailPaneKey(msg)
+		}
 		return m.handleKey(msg)
 
 	case error:
@@ -285,13 +297,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
-	// Only the process list has clickable headers.
-	if y != headerRowY || m.activeView != viewProcessList {
+	panelStartY := m.height - m.graphPanelHeight()
+
+	// Click inside the detail panel area.
+	if y >= panelStartY && m.activeView == viewProcessList {
+		if m.detailPane == detailPaneConns && m.graphPID != 0 {
+			m.detailFocused = true
+		}
 		return m, nil
 	}
 
-	// Walk column X ranges to find which header was clicked.
-	// Use effective cols so the PID column width matches what was rendered.
+	// Click inside the main table area (not header) — return focus to main pane.
+	if y > headerRowY {
+		m.detailFocused = false
+	}
+
+	// Column header click for sorting.
+	if y != headerRowY || m.activeView != viewProcessList {
+		return m, nil
+	}
 	pos := 0
 	for i, w := range m.effectiveProcCols() {
 		if x >= pos && x < pos+w {
@@ -445,6 +469,34 @@ func (m Model) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// handleDetailPaneKey handles keyboard input when the conns pane has focus.
+func (m Model) handleDetailPaneKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "q":
+		return m, tea.Quit
+	case "up", "k":
+		if m.connPaneCursor > 0 {
+			m.connPaneCursor--
+		}
+	case "down", "j":
+		if m.connPaneCursor < len(m.graphConns)-1 {
+			m.connPaneCursor++
+		}
+	case "esc":
+		m.detailFocused = false
+	case "left", "h", "right", "l":
+		if msg.String() == "right" || msg.String() == "l" {
+			m.detailPane = (m.detailPane + 1) % numDetailPanes
+		} else {
+			m.detailPane = (m.detailPane - 1 + numDetailPanes) % numDetailPanes
+		}
+		if m.detailPane != detailPaneConns {
+			m.detailFocused = false
+		}
+	}
+	return m, nil
+}
+
 // syncGraphPID keeps graphPID/graphName aligned with the current cursor.
 func (m *Model) syncGraphPID() {
 	if m.activeView == viewConnDetail {
@@ -464,7 +516,13 @@ func (m *Model) syncGraphPID() {
 	if cur >= len(m.procRows) {
 		cur = len(m.procRows) - 1
 	}
-	m.graphPID = m.procRows[cur].proc.PID
+	newPID := m.procRows[cur].proc.PID
+	if newPID != m.graphPID {
+		// Process changed — reset the conns-pane scroll and focus.
+		m.connPaneCursor = 0
+		m.detailFocused = false
+	}
+	m.graphPID = newPID
 	m.graphName = m.procRows[cur].proc.Comm
 }
 
@@ -959,11 +1017,15 @@ func (m Model) renderFooter() string {
 				break
 			}
 		}
-		paneHint := ""
-		if m.graphPID != 0 {
-			paneHint = "  h/l:pane"
+		if m.detailFocused && m.detailPane == detailPaneConns {
+			keys = helpStyle.Render(fmt.Sprintf("↑↓:scroll  esc:main pane  h/l:pane  %s  q:quit", mouseHint))
+		} else {
+			paneHint := ""
+			if m.graphPID != 0 {
+				paneHint = "  h/l:pane"
+			}
+			keys = helpStyle.Render(fmt.Sprintf("↑↓:nav  enter:detail  click:sort  /:filter  s:sort%s%s  c:containers  %s  q:quit", groupHint, paneHint, mouseHint))
 		}
-		keys = helpStyle.Render(fmt.Sprintf("↑↓:nav  enter:detail  click:sort  /:filter  s:sort%s%s  c:containers  %s  q:quit", groupHint, paneHint, mouseHint))
 	default:
 		geoHint := ""
 		if m.geo != nil {
@@ -1115,12 +1177,10 @@ func (m Model) renderConnPane() string {
 	if maxRows < 1 {
 		maxRows = 1
 	}
-	conns := m.graphConns
-	if len(conns) > maxRows {
-		conns = conns[:maxRows]
-	}
 
-	for _, c := range conns {
+	start, end := visibleRange(m.connPaneCursor, len(m.graphConns), maxRows)
+	for i := start; i < end; i++ {
+		c := m.graphConns[i]
 		protoStyle := protoTCPStyle
 		if c.Proto == "UDP" {
 			protoStyle = protoUDPStyle
@@ -1150,7 +1210,11 @@ func (m Model) renderConnPane() string {
 		if isInbound {
 			dir = "▼ "
 		}
-		sb.WriteString(dimStyle.Render(dir) + renderCells(row, cols, normalStyle))
+		if m.detailFocused && i == m.connPaneCursor {
+			sb.WriteString(selectedStyle.Render("▶ " + renderCells(row, cols, selectedStyle)))
+		} else {
+			sb.WriteString(dimStyle.Render(dir) + renderCells(row, cols, normalStyle))
+		}
 		sb.WriteString("\n")
 	}
 	return sb.String()
