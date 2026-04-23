@@ -1065,8 +1065,8 @@ func (m Model) renderPaneBar() string {
 	return dimStyle.Render("h/l ") + strings.Join(parts, dimStyle.Render(" · ")) + " "
 }
 
-// renderConnPane shows per-connection traffic for the focused process in the detail panel area,
-// in a compact tcpdump-like format.
+// renderConnPane shows per-connection traffic for the focused process in the detail panel,
+// using the same column layout as the full connection detail view (Enter).
 func (m Model) renderConnPane() string {
 	panelH := m.graphPanelHeight()
 	if m.width <= 0 || panelH <= 0 || m.graphPID == 0 {
@@ -1092,23 +1092,23 @@ func (m Model) renderConnPane() string {
 	sb.WriteString(separator + "\n")
 	sb.WriteString(titleLeft + strings.Repeat(" ", titleGap) + paneBar + "\n")
 
-	if len(m.graphConns) == 0 {
-		sb.WriteString(dimStyle.Render("  no connections"))
-		sb.WriteString(strings.Repeat("\n", panelH-3))
-		return sb.String()
+	// Same column layout as renderConnTable.
+	cols := []int{22, m.remoteColW, 5, 13, 9, 9, 9, 9, 8}
+	headers := []string{"LOCAL", "REMOTE", "PROTO", "STATE", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "PPS"}
+	if m.showGeo {
+		cols = []int{22, m.remoteColW, 20, 5, 13, 9, 9, 9, 9, 8}
+		headers = []string{"LOCAL", "REMOTE", "GEO", "PROTO", "STATE", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "PPS"}
 	}
-
-	// Column layout: DIR(2) PROTO(5) LOCAL(22) arrow(3) REMOTE(dynamic) STATE(13) RX(9) TX(9)
-	remoteW := m.width - 2 - 5 - 22 - 3 - 13 - 9 - 9 - 4 // 4 = spacing between last cols
-	if remoteW < 18 {
-		remoteW = 18
-	}
-	cols := []int{2, 5, 22, 3, remoteW, 13, 9, 9}
-	headers := []string{"", "PROTO", "LOCAL", "→", "REMOTE", "STATE", "RX/s", "TX/s"}
 
 	sb.WriteString("\n")
 	sb.WriteString(renderCells(headers, cols, headerStyle))
 	sb.WriteString("\n")
+
+	if len(m.graphConns) == 0 {
+		sb.WriteString(dimStyle.Render("  no connections"))
+		sb.WriteString(strings.Repeat("\n", panelH-5))
+		return sb.String()
+	}
 
 	// available rows: panelH - separator(1) - title(1) - blank(1) - header(1) - blank(1)
 	maxRows := panelH - 5
@@ -1125,28 +1125,32 @@ func (m Model) renderConnPane() string {
 		if c.Proto == "UDP" {
 			protoStyle = protoUDPStyle
 		}
-		isInbound := c.State == "LISTEN" || c.SrcPort < 1024
-		dir := dimStyle.Render("▲")
-		if isInbound {
-			dir = dimStyle.Render("▼")
-		}
 		rxS := colourRate(c.RxRate).Render(formatBytes(c.RxRate) + "/s")
 		txS := colourRate(c.TxRate).Render(formatBytes(c.TxRate) + "/s")
-		state := truncate(c.State, cols[5]-1)
-		if state == "" {
-			state = "—"
-		}
+
 		row := []string{
-			dir,
-			protoStyle.Render(c.Proto),
 			formatAddr(c.SrcAddr, c.SrcPort, false, m.res, m.resolveNames, m.compactIPv6, m.anon),
-			dimStyle.Render("→"),
 			formatAddr(c.DstAddr, c.DstPort, true, m.res, m.resolveNames, m.compactIPv6, m.anon),
-			dimStyle.Render(state),
+		}
+		if m.showGeo {
+			row = append(row, renderGeo(m.geo.Lookup(c.DstAddr)))
+		}
+		row = append(row,
+			protoStyle.Render(c.Proto),
+			truncate(c.State, cols[len(row)]-1),
 			rxS,
 			txS,
+			formatBytes(float64(c.RxTotal)),
+			formatBytes(float64(c.TxTotal)),
+			dimStyle.Render(formatPPS(c.RxPPS+c.TxPPS)),
+		)
+
+		isInbound := c.State == "LISTEN" || c.SrcPort < 1024
+		dir := "▲ "
+		if isInbound {
+			dir = "▼ "
 		}
-		sb.WriteString(renderCells(row, cols, normalStyle))
+		sb.WriteString(dimStyle.Render(dir) + renderCells(row, cols, normalStyle))
 		sb.WriteString("\n")
 	}
 	return sb.String()
