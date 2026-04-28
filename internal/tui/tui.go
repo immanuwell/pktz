@@ -41,11 +41,12 @@ const (
 type sortKey int
 
 const (
-	sortByRx sortKey = iota
-	sortByTx
-	sortByTotal
+	sortByPID sortKey = iota
 	sortByName
-	sortByPID
+	sortByRx
+	sortByTx
+	sortByTotalRx
+	sortByTotalTx
 	sortByConn
 	sortByPPS
 	sortByRetrans
@@ -58,8 +59,10 @@ func (s sortKey) label() string {
 		return "RX/s"
 	case sortByTx:
 		return "TX/s"
-	case sortByTotal:
-		return "Total"
+	case sortByTotalRx:
+		return "Total RX"
+	case sortByTotalTx:
+		return "Total TX"
 	case sortByName:
 		return "Name"
 	case sortByPID:
@@ -84,7 +87,7 @@ const headerRowY = 2
 var (
 	procListCols     = []int{7, 22, 11, 11, 11, 11, 5, 8, 7}
 	procListHeaders  = []string{"PID", "PROCESS", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "CONN", "PPS", "LOSS%"}
-	procListSortKeys = []sortKey{sortByPID, sortByName, sortByRx, sortByTx, sortByTotal, sortByTotal, sortByConn, sortByPPS, sortByRetrans}
+	procListSortKeys = []sortKey{sortByPID, sortByName, sortByRx, sortByTx, sortByTotalRx, sortByTotalTx, sortByConn, sortByPPS, sortByRetrans}
 
 	containerListCols    = []int{24, 6, 11, 11, 11, 11, 5}
 	containerListHeaders = []string{"CONTAINER", "PROCS", "RX/s", "TX/s", "TOTAL RX", "TOTAL TX", "CONN"}
@@ -442,8 +445,8 @@ func (m *Model) applySort(sk sortKey) {
 		m.sortAsc = !m.sortAsc
 	} else {
 		m.sortBy = sk
-		// Natural direction: ascending for text/id columns, descending for rates.
-		m.sortAsc = (sk == sortByName || sk == sortByPID)
+		// Natural direction: ascending for text/id columns, descending for everything else.
+		m.sortAsc = sk == sortByName || sk == sortByPID
 	}
 }
 
@@ -1911,8 +1914,10 @@ func sortProcs(procs []collector.ProcessInfo, by sortKey, asc bool) {
 		switch by {
 		case sortByTx:
 			less = a.TxRate < b.TxRate
-		case sortByTotal:
-			less = (a.RxTotal + a.TxTotal) < (b.RxTotal + b.TxTotal)
+		case sortByTotalRx:
+			less = a.RxTotal < b.RxTotal
+		case sortByTotalTx:
+			less = a.TxTotal < b.TxTotal
 		case sortByName:
 			less = strings.ToLower(a.Comm) < strings.ToLower(b.Comm)
 		case sortByPID:
