@@ -9,6 +9,7 @@ pktz
 bpf/vmlinux.h
 
 # Go artifacts
+dist/
 vendor/
 *.test
 *.prof

@@ -35,9 +35,11 @@ The eBPF objects are pre-compiled and bundled in the module, so no `clang` or `b
 **Or build from source** (if you want to hack on it):
 
 ```bash
-# requires: clang, libbpf-dev, bpftool, Go 1.22+, Linux kernel 5.8+
-make install   # builds + copies to /usr/local/bin
+make check     # test, vet, and build
+make install   # copy to /usr/local/bin
 ```
+
+Regular builds use the bundled eBPF objects and only need the Go version declared in `go.mod`. `clang`, `libbpf-dev`, and `bpftool` are only needed when regenerating those objects after changing `bpf/pktz.c`.
 
 ## Usage
 
