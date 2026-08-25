@@ -62,14 +62,14 @@ func renderGraph(data []float64, width, graphH int, clr lipgloss.Color) string {
 }
 
 // renderTimeAxis builds two rows: tick marks ('|') and timestamp labels below them.
-// numSamples is the actual number of history entries (500ms each); now is the current time.
+// numSamples is the actual number of history entries (300ms each); now is the current time.
 func renderTimeAxis(width, numSamples int, now time.Time) string {
 	if width <= 0 {
 		return "\n"
 	}
 
 	const numTicks = 10
-	displayedDuration := time.Duration(numSamples) * 500 * time.Millisecond
+	displayedDuration := time.Duration(numSamples) * 300 * time.Millisecond
 
 	tickRow := make([]byte, width)
 	for i := range tickRow {
