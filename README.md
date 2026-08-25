@@ -10,7 +10,7 @@
 
 Your machine is talking to things right now. A lot of things. `pktz` tells you exactly who, how much, and to where — in real time.
 
-Built on eBPF, so it hooks straight into the kernel. No polling `/proc`. No sampling. Every byte, every process, no excuses.
+Built on eBPF for traffic accounting, with `/proc` used to map sockets back to processes. No packet sampling. Every byte, every process, no excuses.
 
 ---
 
@@ -35,9 +35,11 @@ The eBPF objects are pre-compiled and bundled in the module, so no `clang` or `b
 **Or build from source** (if you want to hack on it):
 
 ```bash
-# requires: clang, libbpf-dev, bpftool, Go 1.22+, Linux kernel 5.8+
-make install   # builds + copies to /usr/local/bin
+make check     # test, vet, and build
+make install   # copy to /usr/local/bin
 ```
+
+Regular builds use the bundled eBPF objects and only need the Go version declared in `go.mod`. `clang`, `libbpf-dev`, and `bpftool` are only needed when regenerating those objects after changing `bpf/pktz.c`.
 
 ## Usage
 
@@ -66,6 +68,10 @@ Fair warning though: in this mode pktz will see fewer processes than with sudo �
 
 **Live graph** — 5-minute RX/TX history chart, auto-follows whatever process your cursor is on. Rendered in Unicode block chars, looks goated in a dark terminal.
 
+**Detail panes** — inspect connections, process metadata, live `tcpdump` output, and per-process DNS query history without leaving the TUI.
+
+**Container view** — aggregate traffic by container or host, then jump back to the process view with one key.
+
 **GeoIP flags + ASN** — 🇺🇸 CLOUDFLARE, 🇩🇪 HETZNER, 🇷🇺 ???. Optional, see below.
 
 **DNS resolution** — remote addresses show real hostnames instead of raw IPs. You can toggle it off if you want the raw view.
@@ -79,8 +85,11 @@ Fair warning though: in this mode pktz will see fewer processes than with sudo �
 | `↑` `↓` or `j` `k` | navigate |
 | `Enter` | open connection detail |
 | `Esc` / `Backspace` | back to process list |
+| `h` / `l` | cycle detail panes |
+| `Space` | expand or collapse a process group |
 | `s` | cycle sort column |
 | `/` | filter processes by name |
+| `c` | toggle process and container views |
 | `r` | toggle hostname resolution |
 | `v` | toggle compact IPv6 |
 | `g` | toggle GeoIP flags |
@@ -153,12 +162,16 @@ sudo pktz --metrics :9090
 
 Starts an HTTP server at `/metrics` alongside the TUI. Prometheus can scrape it immediately. Exposes per-process gauges and counters:
 
+```bash
+curl http://localhost:9090/metrics
+```
+
 | Metric | Type | Description |
 |--------|------|-------------|
 | `pktz_process_rx_bytes_per_second` | gauge | Current RX rate |
 | `pktz_process_tx_bytes_per_second` | gauge | Current TX rate |
-| `pktz_process_rx_bytes_total` | counter | Total bytes received |
-| `pktz_process_tx_bytes_total` | counter | Total bytes transmitted |
+| `pktz_process_rx_bytes_total` | counter | Bytes received since tracking began |
+| `pktz_process_tx_bytes_total` | counter | Bytes transmitted since tracking began |
 | `pktz_process_connections` | gauge | Open connection count |
 
 All metrics are labeled with `pid` and `comm` (process name).
